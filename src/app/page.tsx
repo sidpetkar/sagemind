@@ -2,8 +2,8 @@
 
 import { useState, FormEvent, useRef, ChangeEvent, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-// Remove unused Image import
-// import Image from 'next/image';
+// Import next/image
+import Image from 'next/image'; 
 // Import Lucide React icons
 import { Paperclip, Mic, Square, X, Send } from 'lucide-react';
 // Import markdown extensions
@@ -465,9 +465,9 @@ export default function ChatPage() {
                             ),
                             
                             // Updated code highlighting logic
-                            code: ({node, inline, className, children, ...props}: any) => {
+                            code: ({ inline, className, children, ...props }: React.ComponentProps<'code'> & { inline?: boolean }) => { 
                               const match = /language-(\w+)/.exec(className || '');
-                              const language = match?.[1];
+                              // const language = match?.[1]; // Keep language detection for potential future use, but ensure it's used if kept
 
                               if (inline) {
                                 // Styling for inline code
@@ -494,12 +494,13 @@ export default function ChatPage() {
                             },
                             
                             // Updated pre component to handle wrapper styling
-                            pre: ({node, children, ...props}) => {
+                            pre: ({ children, ...props }: React.ComponentProps<'pre'>) => { // Remove unused node
                                 // Inspect children to determine the language (needed for theme)
                                 let language: string = ''; // Initialize with an empty string
                                 if (children && typeof children === 'object' && 'props' in children) {
-                                    const childProps = children.props as { className?: string };
-                                    const match = /language-(\w+)/.exec(childProps.className || '');
+                                    // Ensure children.props exists and has className before accessing it
+                                    const childProps = (children as React.ReactElement).props as { className?: string };
+                                    const match = /language-(\w+)/.exec(childProps?.className || '');
                                     language = match?.[1] || ''; // Assign empty string if match is null
                                 }
 
@@ -512,12 +513,12 @@ export default function ChatPage() {
                             },
                             
                             // Other element styling
-                            blockquote: ({node, ...props}) => (
+                            blockquote: ({node, ...props}) => ( // Keep node
                               <blockquote className="pl-4 border-l-4 border-blue-400 italic text-gray-600 my-4" {...props} />
                             ),
-                            li: ({node, ...props}) => <li className="ml-6 my-2 list-disc" {...props} />,
-                            hr: ({node, ...props}) => <hr className="my-6 border-t border-gray-300" {...props} />,
-                            a: ({node, ...props}) => (
+                            li: ({node, ...props}) => <li className="ml-6 my-2 list-disc" {...props} />, // Remove unused node
+                            hr: ({node, ...props}) => <hr className="my-6 border-t border-gray-300" {...props} />, // Remove unused node
+                            a: ({node, ...props}) => ( // Remove unused node
                               <a 
                                 className="text-blue-600 hover:text-blue-800 hover:underline"
                                 target="_blank" 
@@ -525,13 +526,17 @@ export default function ChatPage() {
                                 {...props}
                               />
                             ),
-                            img: ({node, ...props}) => (
-                              <img className="max-w-full h-auto rounded-lg my-4 shadow-sm" {...props} />
+                            img: ({node, ...props}) => ( // Remove unused node
+                              <img 
+                                className="max-w-full h-auto rounded-lg my-4 shadow-sm" 
+                                alt={props.alt || 'Image loaded from markdown'} 
+                                {...props} 
+                              />
                             ),
-                            p: ({node, ...props}) => <p className="my-3" {...props} />,
-                            h1: ({node, ...props}) => <h1 className="text-2xl font-bold mt-6 mb-4" {...props} />,
-                            h2: ({node, ...props}) => <h2 className="text-xl font-bold mt-5 mb-3" {...props} />,
-                            h3: ({node, ...props}) => <h3 className="text-lg font-bold mt-4 mb-2" {...props} />,
+                            p: ({node, ...props}) => <p className="my-3" {...props} />, // Remove unused node
+                            h1: ({node, ...props}) => <h1 className="text-2xl font-bold mt-6 mb-4" {...props} />, // Remove unused node
+                            h2: ({node, ...props}) => <h2 className="text-xl font-bold mt-5 mb-3" {...props} />, // Remove unused node
+                            h3: ({node, ...props}) => <h3 className="text-lg font-bold mt-4 mb-2" {...props} />, // Remove unused node
                           }}
                         >
                           {msg.content}
@@ -598,10 +603,18 @@ export default function ChatPage() {
                 {uploadedFileInfo?.base64 && uploadedFileInfo.originalType.startsWith('image/') && (
                   <div className="flex items-center gap-2 flex-grow min-w-0">
                     <div className="relative h-10 w-10 flex-shrink-0">
-                      <img 
+                      {/* Use next/image Image component */}
+                      <Image 
                         src={`data:${uploadedFileInfo.originalType};base64,${uploadedFileInfo.base64}`}
                         alt="Preview" 
-                        className="h-full w-full object-contain rounded border border-gray-300"
+                        // Option 1: Use layout="fill" and objectFit="contain"
+                        layout="fill"
+                        objectFit="contain"
+                        className="rounded border border-gray-300"
+                        // Option 2: Provide fixed width/height (might require adjusting container)
+                        // width={40} 
+                        // height={40}
+                        // className="rounded border border-gray-300 object-contain"
                       />
                     </div>
                     <span className="text-sm text-gray-700 truncate flex-grow min-w-0" title={uploadedFileInfo.name}>

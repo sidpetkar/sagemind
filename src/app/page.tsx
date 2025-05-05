@@ -466,14 +466,17 @@ export default function ChatPage() {
                             
                             // Updated code highlighting logic
                             code: ({ inline, className, children, ...props }: React.ComponentProps<'code'> & { inline?: boolean }) => { 
+                              // Use the match or store it in a variable that's used
                               const match = /language-(\w+)/.exec(className || '');
-                              // const language = match?.[1]; // Keep language detection for potential future use, but ensure it's used if kept
-
+                              // Use match to determine the language for potential styling
+                              const highlightLanguage = match?.[1] || '';
+                              
                               if (inline) {
                                 // Styling for inline code
                                 return (
                                   <code 
                                     className="px-1 py-0.5 bg-gray-100 text-pink-600 rounded text-sm font-mono"
+                                    data-language={highlightLanguage} // Using the extracted language
                                     {...props}
                                   >
                                     {children}
@@ -482,10 +485,10 @@ export default function ChatPage() {
                               }
 
                               // Assign language class to the <code> element for highlighting
-                              // Specific styling (like dark background for SQL) will be applied to the parent <pre>
                               return (
                                 <code 
-                                  className={className} // Pass the language class e.g., "language-sql"
+                                  className={className}
+                                  data-language={highlightLanguage} // Using the extracted language 
                                   {...props}
                                 >
                                   {children}

@@ -146,7 +146,7 @@ export async function POST(request: Request) {
     console.error("API Route Error (Stream Setup):", error);
     // Return a non-streaming error response for setup issues
     let errorMessage = 'Internal Server Error';
-    let statusCode = 500;
+    const statusCode = 500; // Use const as it's not reassigned
     if (error instanceof Error) {
         errorMessage = error.message; // Use the error message from the service
         if (errorMessage.includes("API Key")) {

@@ -2,7 +2,8 @@
 
 import { useState, FormEvent, useRef, ChangeEvent, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import Image from 'next/image';
+// Remove unused Image import
+// import Image from 'next/image';
 // Import Lucide React icons
 import { Paperclip, Mic, Square, X, Send } from 'lucide-react';
 // Import markdown extensions
@@ -33,7 +34,6 @@ export default function ChatPage() {
   // --- Audio Recording State ---
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
-  const [audioChunks, setAudioChunks] = useState<Blob[]>([]);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   
   // --- File Upload URI State ---
@@ -151,8 +151,6 @@ export default function ChatPage() {
         setSelectedFile(null);
         setAudioUrl(null);
         setUploadedFileInfo(null);
-        setAudioChunks([]);
-        setError(null);
 
         // Using simple MIME type selection
         let mimeType = 'audio/webm';
@@ -168,27 +166,27 @@ export default function ChatPage() {
         const recorder = new MediaRecorder(stream, { mimeType });
         setMediaRecorder(recorder);
         
-        // Store audio chunks in component state
-        const audioChunks: Blob[] = [];
+        // Store audio chunks locally within the function scope
+        const localAudioChunks: Blob[] = [];
         
         recorder.ondataavailable = (event) => {
           if (event.data.size > 0) {
             console.log(`Got audio chunk: ${event.data.size} bytes`);
-            audioChunks.push(event.data);
+            localAudioChunks.push(event.data);
           }
         };
 
         recorder.onstop = async () => {
-          console.log(`Recording stopped, collected ${audioChunks.length} chunks`);
+          console.log(`Recording stopped, collected ${localAudioChunks.length} chunks`);
           
-          if (audioChunks.length === 0) {
+          if (localAudioChunks.length === 0) {
             console.error("No audio data captured");
             setError("No audio data was captured. Please try again.");
             return;
           }
           
-          // Create blob from all chunks
-          const audioBlob = new Blob(audioChunks, { type: mimeType });
+          // Create blob from local chunks
+          const audioBlob = new Blob(localAudioChunks, { type: mimeType });
           console.log(`Created audio blob: ${audioBlob.size} bytes`);
           
           if (audioBlob.size === 0) {
@@ -253,7 +251,6 @@ export default function ChatPage() {
     }
     setAudioUrl(null);
     setSelectedFile(null);
-    setAudioChunks([]); // Clear any lingering chunks
     // If mediaRecorder is still somehow active, ensure tracks are stopped
     if (mediaRecorder && mediaRecorder.stream) {
         mediaRecorder.stream.getTracks().forEach(track => track.stop());

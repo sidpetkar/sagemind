@@ -484,7 +484,7 @@ export default function ChatPage() {
       <div className="max-w-3xl mx-auto flex flex-col h-screen">
         {/* Header - Solid Background, No Border */}
         <header 
-          className="bg-gray-50 pt-3 pb-3 sm:pt-4 sm:pb-4 text-center z-10"
+          className="bg-gray-50 pt-3 pb-3 sm:pt-4 sm:pb-4 text-center z-10 flex-shrink-0"
           // Header background needs to match chat area bg again
         >
           <h1 className="text-lg sm:text-xl font-semibold text-gray-800">SageMind</h1>
@@ -508,7 +508,7 @@ export default function ChatPage() {
             <div
                       className={`px-3 py-2 sm:px-4 sm:py-2 ${
                         msg.role === 'user'
-                          ? 'max-w-[80%] bg-blue-500 text-white rounded-lg shadow'
+                          ? 'max-w-[80%] bg-gray-200 text-gray-800 rounded-lg'
                           : 'w-full bg-transparent text-gray-800'
                       }`}
             >
@@ -683,7 +683,7 @@ export default function ChatPage() {
       )}
 
         {/* Footer - Transparent Background */}
-        <footer className="p-3 bg-transparent">
+        <footer className="p-3 bg-transparent flex-shrink-0">
           <form onSubmit={handleSubmit} className="flex flex-col gap-0"> {/* Use gap-0 on form if needed */}
             {/* Conditionally Render Preview Directly Above Input Container */}
             {(audioUrl || (uploadedFileInfo && uploadedFileInfo.base64 && uploadedFileInfo.originalType.startsWith('image/'))) && (
@@ -843,7 +843,7 @@ export default function ChatPage() {
           <button
                     type="submit" // Corrected type
                     disabled={isLoading || (!inputValue.trim() && !selectedFile && !uploadedFileInfo && !audioUrl)}
-                    className="p-2 bg-blue-600 text-white rounded-full hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square"
+                    className="p-2 bg-black text-white rounded-full hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-700 focus:ring-offset-2 focus:ring-offset-gray-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square"
                     title="Send message"
                   >
                     <ArrowUp className="w-5 h-5" strokeWidth={2.5} />

@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown';
 // Import next/image
 import Image from 'next/image'; 
 // Import Lucide React icons
-import { Paperclip, Mic, Square, X, Send } from 'lucide-react';
+import { Paperclip, Mic, Square, X, Send, ArrowUp } from 'lucide-react';
 // Import markdown extensions
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -19,6 +19,7 @@ interface Message {
   audioUrl?: string; // Optional URL for audio playback
   fileType?: string; // Optional file type info
   fileName?: string; // Optional file name
+  imageBase64Preview?: string; // For image previews in user messages
 }
 
 export default function ChatPage() {
@@ -30,6 +31,11 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null); // Ref for textarea
   const [textareaRows, setTextareaRows] = useState(1); // State for dynamic rows
+  const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false); // State for drag-over visual cue
+
+  // --- Image Overlay State ---
+  const [isImageOverlayOpen, setIsImageOverlayOpen] = useState<boolean>(false);
+  const [overlayImageUrl, setOverlayImageUrl] = useState<string | null>(null);
 
   // --- Audio Recording State ---
   const [isRecording, setIsRecording] = useState<boolean>(false);
@@ -260,6 +266,85 @@ export default function ChatPage() {
   };
   // --- End Audio Recording Logic ---
 
+  // --- Image Overlay Handlers ---
+  const handleOpenImageOverlay = (imageUrl: string) => {
+    setOverlayImageUrl(imageUrl);
+    setIsImageOverlayOpen(true);
+  };
+
+  const handleCloseImageOverlay = () => {
+    setIsImageOverlayOpen(false);
+    setOverlayImageUrl(null);
+  };
+  // --- End Image Overlay Handlers ---
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const files = Array.from(e.dataTransfer.files);
+      const imageFile = files.find(file => file.type.startsWith('image/'));
+
+      if (imageFile) {
+        // Clear any existing selections before processing the new one
+        setSelectedFile(null);
+        setAudioUrl(null);
+        setUploadedFileInfo(null);
+        if (isRecording && mediaRecorder) {
+          mediaRecorder.stop();
+        }
+        // Call existing uploadFile function
+        await uploadFile(imageFile);
+      } else {
+        setError("Only image files can be dropped.");
+      }
+      // Clean up the data transfer object
+      e.dataTransfer.clearData();
+    }
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData.items;
+    let imageFileFound = false;
+
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
+        e.preventDefault(); // Prevent default paste action for the image
+        const imageFile = items[i].getAsFile();
+
+        if (imageFile) {
+          // Clear any existing selections before processing the new one
+          setSelectedFile(null);
+          setAudioUrl(null);
+          setUploadedFileInfo(null);
+          if (isRecording && mediaRecorder) {
+            mediaRecorder.stop();
+          }
+          await uploadFile(imageFile);
+          imageFileFound = true;
+          break; // Process only the first image found
+        }
+      }
+    }
+    // If an image was pasted and handled, we don't want to also paste any text content
+    // that might have been part of the same paste operation (e.g. from a rich text editor)
+    // However, if NO image was found, allow default text pasting to occur.
+  };
+
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     // Ensure there is either text input or a file selected
@@ -269,36 +354,28 @@ export default function ChatPage() {
     setError(null);
 
     const historyToSend = messages;
-    const currentMessage = inputValue;
+    const currentMessageText = inputValue;
 
-    // Display file info in user message only for non-audio files
-    let userMessageContent = currentMessage;
-    if (uploadedFileInfo) {
-      const isAudio = uploadedFileInfo.originalType.startsWith('audio/');
-      // Don't include filename in message content for audio files
-      if (!isAudio) {
-        userMessageContent = `${currentMessage} (File: ${uploadedFileInfo.name})`;
-      }
-      console.log("Using preprocessed file:", uploadedFileInfo);
-    } else if (selectedFile) {
-      const isAudio = selectedFile.type.startsWith('audio/');
-      // Don't include filename in message content for audio files
-      if (!isAudio) {
-        userMessageContent = `${currentMessage} (File: ${selectedFile.name})`;
-      }
-      console.log("Using direct file:", selectedFile.name);
-    }
-    
-    // Create user message with audio data if available
-    const userMessage: Message = { 
-      role: 'user', 
-      content: userMessageContent,
-      // Save audio URL if we have one
+    const userMessage: Message = {
+      role: 'user',
+      content: currentMessageText, // Only the typed text
       audioUrl: audioUrl || undefined,
-      // Save file type info if available
-      fileType: selectedFile?.type || uploadedFileInfo?.originalType,
-      fileName: selectedFile?.name || uploadedFileInfo?.name
+      fileType: uploadedFileInfo?.originalType || selectedFile?.type,
+      fileName: uploadedFileInfo?.name || selectedFile?.name,
+      imageBase64Preview: undefined,
     };
+
+    if (uploadedFileInfo && uploadedFileInfo.originalType.startsWith('image/')) {
+      userMessage.imageBase64Preview = uploadedFileInfo.base64;
+    } 
+    // If it's not an image from uploadedFileInfo, and not audio, and there's a filename but no text, set filename as content
+    // This handles showing "(File: ...)" for non-image/non-audio files IF there was no text input.
+    // If there IS text input, that text is the content, and the filename for other files will be shown separately during rendering.
+    else if (uploadedFileInfo && !uploadedFileInfo.originalType.startsWith('audio/') && !userMessage.content.trim() && userMessage.fileName) {
+      userMessage.content = `(File: ${userMessage.fileName})`;
+    } else if (selectedFile && !selectedFile.type.startsWith('audio/') && !selectedFile.type.startsWith('image/') && !userMessage.content.trim() && userMessage.fileName) {
+      userMessage.content = `(File: ${userMessage.fileName})`;
+    }
     
     setMessages((prevMessages) => [...prevMessages, userMessage]);
     setInputValue('');
@@ -316,7 +393,7 @@ export default function ChatPage() {
       const formData = new FormData();
       
       // Always include a message (even if empty) to avoid the 'Message required' error
-      formData.append('message', currentMessage || " ");
+      formData.append('message', currentMessageText || " ");
       formData.append('history', JSON.stringify(historyToSend));
       
       // If we have preprocessed file data, use that
@@ -429,10 +506,11 @@ export default function ChatPage() {
             className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
           >
             <div
-                      className={`max-w-[80%] sm:max-w-xs lg:max-w-md px-3 py-2 sm:px-4 sm:py-2 rounded-lg shadow ${msg.role === 'user'
-                  ? 'bg-blue-500 text-white'
-                  : 'bg-white text-gray-800'}`
-              }
+                      className={`px-3 py-2 sm:px-4 sm:py-2 ${
+                        msg.role === 'user'
+                          ? 'max-w-[80%] bg-blue-500 text-white rounded-lg shadow'
+                          : 'w-full bg-transparent text-gray-800'
+                      }`}
             >
               {msg.role === 'ai' ? (
                         <ReactMarkdown
@@ -545,14 +623,41 @@ export default function ChatPage() {
                           {msg.content}
                         </ReactMarkdown>
                    ) : (
-                        <>
-                          <div>{msg.content}</div>
-                          {/* Add audio player if message has audioUrl */}
+                        <div className="flex flex-col"> {/* Wrapper for stacking and alignment */}
+                          {/* Image Preview (if image) - right aligned, above text */}
+                          {msg.imageBase64Preview && msg.fileType?.startsWith('image/') && (
+                            <div className="ml-auto"> {/* Pushes the image to the right */}
+                              <img
+                                src={`data:${msg.fileType};base64,${msg.imageBase64Preview}`}
+                                alt={msg.fileName || 'User image preview'}
+                                className="mt-1 mb-1 max-h-20 w-auto rounded-md cursor-pointer hover:opacity-80 shadow-sm"
+                                onClick={() => handleOpenImageOverlay(`data:${msg.fileType};base64,${msg.imageBase64Preview}`)}
+                              />
+                            </div>
+                          )}
+
+                          {/* Display text content if any - takes full width available in the bubble */}
+                          {msg.content && msg.content.trim() && (
+                            <div className="w-full">{msg.content}</div>
+                          )}
+
+                          {/* Display file name for non-image, non-audio files (if not already in content) */}
+                          {!msg.imageBase64Preview &&
+                           msg.fileName &&
+                           !msg.fileType?.startsWith('audio/') &&
+                           !msg.fileType?.startsWith('image/') &&
+                           msg.content !== `(File: ${msg.fileName})` && (
+                             <div className="mt-1 text-sm opacity-70 w-full">
+                               (File: {msg.fileName})
+                             </div>
+                          )}
+
+                          {/* Existing audio player logic - takes full width available */}
                           {msg.audioUrl && msg.fileType?.startsWith('audio/') && (
-                            <div className="mt-2">
-                              <audio 
-                                src={msg.audioUrl} 
-                                controls 
+                            <div className="mt-2 w-full">
+                              <audio
+                                src={msg.audioUrl!}
+                                controls
                                 className="max-w-full max-h-8"
                                 preload="metadata"
                               />
@@ -563,7 +668,7 @@ export default function ChatPage() {
                               </div>
                             </div>
                           )}
-                        </>
+                        </div>
               )}
             </div>
           </div>
@@ -581,13 +686,13 @@ export default function ChatPage() {
         <footer className="p-3 bg-transparent">
           <form onSubmit={handleSubmit} className="flex flex-col gap-0"> {/* Use gap-0 on form if needed */}
             {/* Conditionally Render Preview Directly Above Input Container */}
-            {(audioUrl || (uploadedFileInfo?.base64 && uploadedFileInfo.originalType.startsWith('image/'))) && (
+            {(audioUrl || (uploadedFileInfo && uploadedFileInfo.base64 && uploadedFileInfo.originalType.startsWith('image/'))) && (
               <div className="p-2 bg-gray-100 rounded-t-xl border border-gray-200 border-b-0 shadow-sm flex items-center justify-between">
                 {/* Display audio preview */} 
                 {audioUrl && (
                   <div className="flex items-center gap-2 flex-grow min-w-0">
                     <audio 
-                      src={audioUrl} 
+                      src={audioUrl!} 
                       controls 
                       className="max-h-8 w-full rounded-full border border-gray-300 p-0.5 bg-transparent"
                     />
@@ -603,7 +708,7 @@ export default function ChatPage() {
                   </div>
                 )}
                 {/* Display image preview */}
-                {uploadedFileInfo?.base64 && uploadedFileInfo.originalType.startsWith('image/') && (
+                {uploadedFileInfo && uploadedFileInfo.base64 && uploadedFileInfo.originalType.startsWith('image/') && (
                   <div className="flex items-center gap-2 flex-grow min-w-0">
                     <div className="relative h-10 w-10 flex-shrink-0">
                       {/* Use next/image Image component */}
@@ -641,11 +746,15 @@ export default function ChatPage() {
             <div 
               className={`
                 bg-gray-100 p-3 flex flex-col gap-2 shadow-sm border border-gray-200
-                ${(audioUrl || (uploadedFileInfo?.base64 && uploadedFileInfo.originalType.startsWith('image/'))) 
+                ${(audioUrl || (uploadedFileInfo && uploadedFileInfo.base64 && uploadedFileInfo.originalType.startsWith('image/'))) 
                   ? 'rounded-b-xl border-t-0' 
                   : 'rounded-xl'
                 }
+                ${isDraggingOver ? 'border-blue-500 border-dashed border-2 ring-2 ring-blue-300' : 'border-gray-200'}
               `}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
             >
               {/* Text Input (Textarea) Row */}
               <div className="flex items-start gap-2">
@@ -667,6 +776,7 @@ export default function ChatPage() {
                       }
                     }
                   }}
+                  onPaste={handlePaste}
                 />
                 {/* Removed the inline preview div */}
               </div>
@@ -736,7 +846,7 @@ export default function ChatPage() {
                     className="p-2 bg-blue-600 text-white rounded-full hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square"
                     title="Send message"
                   >
-                    <Send className="w-5 h-5" strokeWidth={2.5} />
+                    <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
           </button>
                 </div>
               </div>
@@ -749,6 +859,29 @@ export default function ChatPage() {
           </div>
       </footer>
       </div>
+
+      {/* Image Overlay Modal */}
+      {isImageOverlayOpen && overlayImageUrl && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4 cursor-pointer"
+          onClick={handleCloseImageOverlay} // Close on clicking background
+        >
+          <div
+            className="relative bg-transparent max-w-[90vw] max-h-[90vh] overflow-auto cursor-default"
+            onClick={(e) => e.stopPropagation()} // Prevent click on image/modal from closing it
+          >
+            <button
+              onClick={handleCloseImageOverlay}
+              className="absolute top-2 right-2 text-gray-500 hover:text-gray-800 bg-white bg-opacity-70 hover:bg-opacity-100 rounded-full p-1.5 z-10 leading-none"
+              aria-label="Close image overlay"
+              title="Close image"
+            >
+              <X className="w-5 h-5 sm:w-6 sm:w-6" />
+            </button>
+            <img src={overlayImageUrl} alt="Full size preview" className="block max-w-full max-h-[85vh] object-contain" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

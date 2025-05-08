@@ -13,6 +13,9 @@ import rehypeSanitize from 'rehype-sanitize';
 import rehypeHighlight from 'rehype-highlight';
 import 'highlight.js/styles/github.css'; // Import a syntax highlighting theme
 
+// Import SuperEllipseImg
+import { SuperEllipseImg } from "react-superellipse";
+
 interface Message {
   role: 'user' | 'ai';
   content: string;
@@ -506,11 +509,18 @@ export default function ChatPage() {
             className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
           >
             <div
-                      className={`px-3 py-2 sm:px-4 sm:py-2 ${
-                        msg.role === 'user'
-                          ? 'max-w-[80%] bg-gray-200 text-gray-800 rounded-lg'
-                          : 'w-full bg-transparent text-gray-800'
-                      }`}
+              className={`px-3 py-2 sm:px-4 sm:py-2 ${
+                msg.role === 'user'
+                  ? 'max-w-[80%] bg-gray-200 text-gray-800'
+                  : 'w-full bg-transparent text-gray-800'
+              }`}
+              style={msg.role === 'user' ? {
+                // Squircle-like border-radius for user messages, except bottom-right
+                borderTopLeftRadius: '24px',
+                borderTopRightRadius: '24px',
+                borderBottomLeftRadius: '24px',
+                borderBottomRightRadius: '8px' // Subtle roundness for bottom-right
+              } : {}}
             >
               {msg.role === 'ai' ? (
                         <ReactMarkdown
@@ -684,86 +694,86 @@ export default function ChatPage() {
 
         {/* Footer - Transparent Background */}
         <footer className="p-3 bg-transparent flex-shrink-0">
-          <form onSubmit={handleSubmit} className="flex flex-col gap-0"> {/* Use gap-0 on form if needed */}
-            {/* Conditionally Render Preview Directly Above Input Container */}
-            {(audioUrl || (uploadedFileInfo && uploadedFileInfo.base64 && uploadedFileInfo.originalType.startsWith('image/'))) && (
-              <div className="p-2 bg-gray-100 rounded-t-xl border border-gray-200 border-b-0 shadow-sm flex items-center justify-between">
-                {/* Display audio preview */} 
-                {audioUrl && (
-                  <div className="flex items-center gap-2 flex-grow min-w-0">
-                    <audio 
-                      src={audioUrl!} 
-                      controls 
-                      className="max-h-8 w-full rounded-full border border-gray-300 p-0.5 bg-transparent"
-                    />
-                    <button 
-                      type="button" 
-                      onClick={clearRecording} 
-                      className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-50 flex-shrink-0"
-                      aria-label="Clear recording"
-                      title="Clear recording"
-                    >
-                      <X className="w-4 h-4" strokeWidth={2.5} />
-                    </button>
-                  </div>
-                )}
-                {/* Display image preview */}
-                {uploadedFileInfo && uploadedFileInfo.base64 && uploadedFileInfo.originalType.startsWith('image/') && (
-                  <div className="flex items-center gap-2 flex-grow min-w-0">
-                    <div className="relative h-10 w-10 flex-shrink-0">
-                      {/* Use next/image Image component */}
-                      <Image 
-                        src={`data:${uploadedFileInfo.originalType};base64,${uploadedFileInfo.base64}`}
-                        alt="Preview" 
-                        // Option 1: Use layout="fill" and objectFit="contain"
-                        layout="fill"
-                        objectFit="contain"
-                        className="rounded border border-gray-300"
-                        // Option 2: Provide fixed width/height (might require adjusting container)
-                        // width={40} 
-                        // height={40}
-                        // className="rounded border border-gray-300 object-contain"
-                      />
-                    </div>
-                    <span className="text-sm text-gray-700 truncate flex-grow min-w-0" title={uploadedFileInfo.name}>
-                      {uploadedFileInfo.name}
-                    </span>
-                    <button 
-                      type="button" 
-                      onClick={() => setUploadedFileInfo(null)} 
-                      className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-50 flex-shrink-0"
-                      aria-label="Clear image"
-                      title="Clear image"
-                    >
-                      <X className="w-4 h-4" strokeWidth={2.5} />
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Main Input Container - Conditional Rounding */}
+          <form onSubmit={handleSubmit} className="flex flex-col gap-0"> 
+            {/* Main Input Container with very large border-radius for squircle-like appearance */}
             <div 
               className={`
-                bg-gray-100 p-3 flex flex-col gap-2 shadow-sm border border-gray-200
-                ${(audioUrl || (uploadedFileInfo && uploadedFileInfo.base64 && uploadedFileInfo.originalType.startsWith('image/'))) 
-                  ? 'rounded-b-xl border-t-0' 
-                  : 'rounded-xl'
+                p-3 
+                flex flex-col gap-2 
+                bg-gray-100 
+                shadow-sm 
+                ${isDraggingOver 
+                  ? 'border-2 border-dashed border-blue-500 ring-2 ring-blue-300' 
+                  : 'border border-gray-200'
                 }
-                ${isDraggingOver ? 'border-blue-500 border-dashed border-2 ring-2 ring-blue-300' : 'border-gray-200'}
               `}
+              style={{ 
+                borderRadius: '32px',
+              }}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
             >
+              {/* Conditionally Render Preview Inside Main Container */}
+              {(audioUrl || (uploadedFileInfo && uploadedFileInfo.base64 && uploadedFileInfo.originalType.startsWith('image/'))) && (
+                <div className="mb-2 pb-2 border-b border-gray-200 flex items-center justify-between">
+                  {/* Display audio preview */} 
+                  {audioUrl && (
+                    <div className="flex items-center gap-2 flex-grow min-w-0">
+                      <audio 
+                        src={audioUrl!} 
+                        controls 
+                        className="max-h-8 w-full rounded-full border border-gray-300 p-0.5 bg-transparent"
+                      />
+                      <button 
+                        type="button" 
+                        onClick={clearRecording} 
+                        className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-50 flex-shrink-0"
+                        aria-label="Clear recording"
+                        title="Clear recording"
+                      >
+                        <X className="w-4 h-4" strokeWidth={2.5} />
+                      </button>
+                    </div>
+                  )}
+                  {/* Display image preview */}
+                  {uploadedFileInfo && uploadedFileInfo.base64 && uploadedFileInfo.originalType.startsWith('image/') && (
+                    <div className="flex items-center gap-2 flex-grow min-w-0">
+                      <div className="relative h-10 w-10 flex-shrink-0">
+                        {/* Use next/image Image component */}
+                        <Image 
+                          src={`data:${uploadedFileInfo.originalType};base64,${uploadedFileInfo.base64}`}
+                          alt="Preview" 
+                          layout="fill"
+                          objectFit="contain"
+                          className="rounded border border-gray-300"
+                        />
+                      </div>
+                      <span className="text-sm text-gray-700 truncate flex-grow min-w-0" title={uploadedFileInfo.name}>
+                        {uploadedFileInfo.name}
+                      </span>
+                      <button 
+                        type="button" 
+                        onClick={() => setUploadedFileInfo(null)} 
+                        className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-50 flex-shrink-0"
+                        aria-label="Clear image"
+                        title="Clear image"
+                      >
+                        <X className="w-4 h-4" strokeWidth={2.5} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+              
               {/* Text Input (Textarea) Row */}
               <div className="flex items-start gap-2">
                 {/* Textarea */} 
                 <textarea
                   ref={textareaRef}
                   rows={textareaRows}
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
                   placeholder="Message SageMind..."
                   disabled={isLoading}
                   className="flex-grow bg-transparent focus:outline-none text-gray-900 text-base placeholder-gray-500 resize-none overflow-y-auto pr-2"
@@ -778,17 +788,16 @@ export default function ChatPage() {
                   }}
                   onPaste={handlePaste}
                 />
-                {/* Removed the inline preview div */}
               </div>
 
               {/* Bottom Bar: Dropdown & Buttons */}
-              <div className="flex justify-between items-center pt-2 border-t border-gray-200">
-                {/* Model Dropdown - Placeholder */}
+              <div className="flex justify-between items-center pt-2">
+                {/* Model Dropdown with squircle styling */}
                 <div className="relative">
-                  {/* Reverted select styling */}
                   <select 
                     defaultValue="gemini-1.5-flash"
-                    className="appearance-none bg-gray-200 border border-gray-300 text-gray-700 text-xs rounded-md focus:ring-blue-500 focus:border-blue-500 block w-full py-1.5 pl-2 pr-7 hover:bg-gray-300 cursor-pointer"
+                    className="appearance-none bg-gray-200 border border-gray-300 text-gray-700 text-xs focus:ring-blue-500 focus:border-blue-500 block w-full py-1.5 pl-2 pr-7 hover:bg-gray-300 cursor-pointer"
+                    style={{ borderRadius: '12px' }}
                     disabled={isLoading} 
                     title="Select AI Model"
                   >
@@ -804,12 +813,13 @@ export default function ChatPage() {
 
                 {/* Right Side Buttons */}
                 <div className="flex items-center gap-2">
-                   {/* Attachments Button - Ensure onClick is correct */}
+                   {/* Attachments Button with squircle styling */}
                   <button
-                    type="button" // Important: prevent form submission
-                    onClick={() => fileInputRef.current?.click()} // Corrected onClick for file picker
-            disabled={isLoading}
-                    className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded-full flex items-center justify-center"
+                    type="button" 
+                    onClick={() => fileInputRef.current?.click()} 
+                    disabled={isLoading}
+                    className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 flex items-center justify-center bg-gray-100"
+                    style={{ borderRadius: '14px' }} // Squircle-like for button
                     aria-label="Attach file"
                     title="Attach image or audio file"
                   >
@@ -818,18 +828,19 @@ export default function ChatPage() {
                   {/* Hidden file input - must exist for ref to work */}
                   <input
                     type="file"
-                    ref={fileInputRef} // Ensure ref is attached
+                    ref={fileInputRef} 
                     onChange={handleFileChange}
                     className="hidden"
                     accept="image/*,audio/*"
                   />
 
-                  {/* Microphone Button */}
+                  {/* Microphone Button with squircle styling */}
                   <button
-                    type="button" // Important: prevent form submission
+                    type="button" 
                     onClick={toggleRecording}
                     disabled={isLoading}
-                    className={`p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded-full flex items-center justify-center ${isRecording ? 'text-red-600 bg-red-100' : ''}`}
+                    className={`p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 flex items-center justify-center ${isRecording ? 'text-red-600 bg-red-100' : 'bg-gray-100'}`}
+                    style={{ borderRadius: '14px' }} // Squircle-like for button
                     aria-label={isRecording ? "Stop recording" : "Start recording"}
                     title={isRecording ? "Stop recording" : "Record audio"}
                   >
@@ -839,25 +850,26 @@ export default function ChatPage() {
                     }
                   </button>
                   
-                  {/* Send Button - Ensure type="submit" */}
-          <button
-                    type="submit" // Corrected type
+                  {/* Send Button with squircle styling */}
+                  <button
+                    type="submit" 
                     disabled={isLoading || (!inputValue.trim() && !selectedFile && !uploadedFileInfo && !audioUrl)}
-                    className="p-2 bg-black text-white rounded-full hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-700 focus:ring-offset-2 focus:ring-offset-gray-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square"
+                    className="p-2 bg-black text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-700 focus:ring-offset-2 focus:ring-offset-gray-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square"
+                    style={{ borderRadius: '16px' }} // Squircle-like for send button
                     title="Send message"
                   >
                     <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
-          </button>
+                  </button>
                 </div>
               </div>
             </div>
-        </form>
+          </form>
 
           {/* Footer Text (Outside Main Container) */}
           <div className="text-center text-xs text-gray-500 mt-2">
             Experiment by <a href="https://x.com/siddhantpetkar" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-700">@sidpetkar</a>
           </div>
-      </footer>
+        </footer>
       </div>
 
       {/* Image Overlay Modal */}

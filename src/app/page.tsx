@@ -23,6 +23,9 @@ interface Message {
   fileType?: string; // Optional file type info
   fileName?: string; // Optional file name
   imageBase64Preview?: string; // For image previews in user messages
+  imageUrl?: string; // For AI-generated images
+  webSearchQueries?: string[]; // For Google Search grounded queries
+  renderedContent?: string; // For Google Search rendered suggestions
 }
 
 export default function ChatPage() {
@@ -35,6 +38,9 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null); // Ref for textarea
   const [textareaRows, setTextareaRows] = useState(1); // State for dynamic rows
   const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false); // State for drag-over visual cue
+
+  // --- Model Selection State ---
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-2.0-flash'); // Default model
 
   // --- Image Overlay State ---
   const [isImageOverlayOpen, setIsImageOverlayOpen] = useState<boolean>(false);
@@ -350,37 +356,38 @@ export default function ChatPage() {
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    // Ensure there is either text input or a file selected
-    if (!inputValue.trim() && !selectedFile && !uploadedFileInfo && !audioUrl) return;
+    
+    // Continue with normal message handling
+    if (!inputValue.trim() && !selectedFile && !audioUrl && !uploadedFileInfo) {
+      setError('Please enter a message or select a file.');
+      return;
+    }
+
+    const userMessageContent = inputValue.trim();
 
     setIsLoading(true);
     setError(null);
 
     const historyToSend = messages;
-    const currentMessageText = inputValue;
 
-    const userMessage: Message = {
+    // Add user message to state (including file info if present)
+    const newUserMessage: Message = {
       role: 'user',
-      content: currentMessageText, // Only the typed text
-      audioUrl: audioUrl || undefined,
-      fileType: uploadedFileInfo?.originalType || selectedFile?.type,
-      fileName: uploadedFileInfo?.name || selectedFile?.name,
-      imageBase64Preview: undefined,
+      content: userMessageContent,
+      ...(uploadedFileInfo && {
+        fileType: uploadedFileInfo.originalType,
+        fileName: uploadedFileInfo.name,
+        // Add base64 preview for images shown on user side
+        ...(uploadedFileInfo.originalType.startsWith('image/') && { imageBase64Preview: `data:${uploadedFileInfo.originalType};base64,${uploadedFileInfo.base64}` })
+      }),
+      ...(audioUrl && selectedFile && { // If there was a recording
+        audioUrl: audioUrl,
+        fileType: selectedFile.type,
+        fileName: selectedFile.name,
+      }),
     };
 
-    if (uploadedFileInfo && uploadedFileInfo.originalType.startsWith('image/')) {
-      userMessage.imageBase64Preview = uploadedFileInfo.base64;
-    } 
-    // If it's not an image from uploadedFileInfo, and not audio, and there's a filename but no text, set filename as content
-    // This handles showing "(File: ...)" for non-image/non-audio files IF there was no text input.
-    // If there IS text input, that text is the content, and the filename for other files will be shown separately during rendering.
-    else if (uploadedFileInfo && !uploadedFileInfo.originalType.startsWith('audio/') && !userMessage.content.trim() && userMessage.fileName) {
-      userMessage.content = `(File: ${userMessage.fileName})`;
-    } else if (selectedFile && !selectedFile.type.startsWith('audio/') && !selectedFile.type.startsWith('image/') && !userMessage.content.trim() && userMessage.fileName) {
-      userMessage.content = `(File: ${userMessage.fileName})`;
-    }
-    
-    setMessages((prevMessages) => [...prevMessages, userMessage]);
+    setMessages((prevMessages) => [...prevMessages, newUserMessage]);
     setInputValue('');
     setTextareaRows(1);
     setSelectedFile(null);
@@ -396,8 +403,9 @@ export default function ChatPage() {
       const formData = new FormData();
       
       // Always include a message (even if empty) to avoid the 'Message required' error
-      formData.append('message', currentMessageText || " ");
       formData.append('history', JSON.stringify(historyToSend));
+      formData.append('message', userMessageContent);
+      formData.append('modelName', selectedModel); // Pass the selected model
       
       // If we have preprocessed file data, use that
       if (uploadedFileInfo) {
@@ -439,28 +447,76 @@ export default function ChatPage() {
       const decoder = new TextDecoder();
       let done = false;
       let accumulatedResponse = '';
+      let currentWebSearchQueries: string[] | undefined = undefined;
+      let currentRenderedContent: string | undefined = undefined;
+      const buffer = '' // Buffer for incomplete JSON strings
 
       while (!done) {
         const { value, done: streamDone } = await reader.read();
         done = streamDone;
         if (value) {
-          const chunk = decoder.decode(value, { stream: true });
-          accumulatedResponse += chunk;
-          // Update the content of the placeholder AI message
-          setMessages((prevMessages) => {
-            const updatedMessages = [...prevMessages];
-            // Ensure the index is valid before attempting update
-            if(updatedMessages[aiMessageIndex]) {
-                 updatedMessages[aiMessageIndex] = {
-                    ...updatedMessages[aiMessageIndex],
-                    content: accumulatedResponse,
-                 };
+          const rawJsonStrings = decoder.decode(value, { stream: true });
+          // Split by newline in case multiple JSON objects are received in one chunk
+          const jsonObjectsAsString = rawJsonStrings.split('\n').filter(s => s.trim() !== '');
+
+          for (const jsonObjStr of jsonObjectsAsString) {
+            try {
+              const payload = JSON.parse(jsonObjStr);
+
+              if (payload.text) {
+                accumulatedResponse += payload.text;
+              }
+              if (payload.webSearchQueries) {
+                currentWebSearchQueries = payload.webSearchQueries;
+              }
+              if (payload.renderedContent) {
+                currentRenderedContent = payload.renderedContent;
+              }
+
+              // Update the content of the placeholder AI message
+              setMessages((prevMessages) => {
+                const updatedMessages = [...prevMessages];
+                if(updatedMessages[aiMessageIndex]) {
+                    updatedMessages[aiMessageIndex] = {
+                        ...updatedMessages[aiMessageIndex],
+                        content: accumulatedResponse,
+                        webSearchQueries: currentWebSearchQueries || updatedMessages[aiMessageIndex].webSearchQueries,
+                        renderedContent: currentRenderedContent || updatedMessages[aiMessageIndex].renderedContent,
+                    };
+                }
+                return updatedMessages;
+              });
+            } catch (parseError) {
+              console.error("Error parsing JSON chunk from stream:", parseError, "Chunk:", jsonObjStr);
+              // Handle partial JSON if necessary, or buffer it.
+              // For simplicity here, we log and skip. A robust solution might buffer incomplete lines.
             }
-            return updatedMessages;
-          });
+          }
         }
       }
       // --- End Streaming Handling ---
+
+      // This section for image handling might need adjustment if image data comes differently now
+      if (accumulatedResponse.startsWith("data:image") || accumulatedResponse.includes("<img src=")) { // crude check
+           setMessages(prevMessages => prevMessages.map((msg, i) => {
+              if (i === aiMessageIndex) {
+                  let imageUrl = accumulatedResponse;
+                  if (accumulatedResponse.includes("<img src=")) { // very basic parsing
+                      const match = accumulatedResponse.match(/<img src="([^"]*)"/);
+                      if (match && match[1]) imageUrl = match[1];
+                      else imageUrl = ""; // Could not parse, clear it or show error
+                  }
+                  // Use the message from prevMessages at aiMessageIndex as the base
+                  const baseAiMessage = prevMessages[aiMessageIndex]; 
+                  return { 
+                    ...baseAiMessage, 
+                    content: imageUrl ? "" : "Image response (see image).", 
+                    imageUrl: imageUrl 
+                  };
+              }
+              return msg;
+          }));
+      }
 
     } catch (err: unknown) {
         if (err instanceof Error) {
@@ -503,186 +559,223 @@ export default function ChatPage() {
            
            {/* Inner container for messages with padding */}
            <div className="p-3 sm:p-4 space-y-3 sm:space-y-4">
-        {messages.map((msg, index) => (
-          <div
-            key={index}
-            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            <div
-              className={`px-3 py-2 sm:px-4 sm:py-2 ${
-                msg.role === 'user'
-                  ? 'max-w-[80%] bg-gray-200 text-gray-800'
-                  : 'w-full bg-transparent text-gray-800'
-              }`}
-              style={msg.role === 'user' ? {
-                // Squircle-like border-radius for user messages, except bottom-right
-                borderTopLeftRadius: '24px',
-                borderTopRightRadius: '24px',
-                borderBottomLeftRadius: '24px',
-                borderBottomRightRadius: '8px' // Subtle roundness for bottom-right
-              } : {}}
-            >
-              {msg.role === 'ai' ? (
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          rehypePlugins={[rehypeRaw, rehypeSanitize, rehypeHighlight]}
-                          components={{
-                            // Modern table styling
-                            table: ({node, ...props}) => (
-                              <div className="my-6 overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
-                                <table className="min-w-full divide-y divide-gray-200 bg-white" {...props} />
-                              </div>
-                            ),
-                            thead: ({node, ...props}) => (
-                              <thead className="bg-gray-100" {...props} />
-                            ),
-                            th: ({node, ...props}) => (
-                              <th 
-                                className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-r last:border-r-0" 
-                                {...props} 
-                              />
-                            ),
-                            tbody: ({node, ...props}) => (
-                              <tbody className="bg-white divide-y divide-gray-200" {...props} />
-                            ),
-                            tr: ({node, ...props}) => (
-                              <tr className="hover:bg-blue-50 transition-colors" {...props} />
-                            ),
-                            td: ({node, ...props}) => (
-                              <td className="px-4 py-3 text-sm text-gray-700 border-r last:border-r-0" {...props} />
-                            ),
+            {messages.map((msg, index) => (
+              <div
+                key={index}
+                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`px-3 py-2 sm:px-4 sm:py-2 ${
+                    msg.role === 'user'
+                      ? 'max-w-[80%] bg-gray-200 text-gray-800'
+                      : 'w-full bg-transparent text-gray-800'
+                  }`}
+                  style={msg.role === 'user' ? {
+                    borderTopLeftRadius: '24px',
+                    borderTopRightRadius: '24px',
+                    borderBottomLeftRadius: '24px',
+                    borderBottomRightRadius: '8px'
+                  } : {}}
+                >
+                  {msg.role === 'ai' ? (
+                    <>
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeRaw, rehypeSanitize, rehypeHighlight]}
+                        components={{
+                          table: ({node, ...props}) => (
+                            <div className="my-6 overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
+                              <table className="min-w-full divide-y divide-gray-200 bg-white" {...props} />
+                            </div>
+                          ),
+                          thead: ({node, ...props}) => (
+                            <thead className="bg-gray-100" {...props} />
+                          ),
+                          th: ({node, ...props}) => (
+                            <th 
+                              className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-r last:border-r-0" 
+                              {...props} 
+                            />
+                          ),
+                          tbody: ({node, ...props}) => (
+                            <tbody className="bg-white divide-y divide-gray-200" {...props} />
+                          ),
+                          tr: ({node, ...props}) => (
+                            <tr className="hover:bg-blue-50 transition-colors" {...props} />
+                          ),
+                          td: ({node, ...props}) => (
+                            <td className="px-4 py-3 text-sm text-gray-700 border-r last:border-r-0" {...props} />
+                          ),
+                          code: ({ inline, className, children, ...props }: React.ComponentProps<'code'> & { inline?: boolean }) => { 
+                            const match = /language-(\w+)/.exec(className || '');
+                            const highlightLanguage = match?.[1] || '';
                             
-                            // Updated code highlighting logic
-                            code: ({ inline, className, children, ...props }: React.ComponentProps<'code'> & { inline?: boolean }) => { 
-                              // Use the match or store it in a variable that's used
-                              const match = /language-(\w+)/.exec(className || '');
-                              // Use match to determine the language for potential styling
-                              const highlightLanguage = match?.[1] || '';
-                              
-                              if (inline) {
-                                // Styling for inline code
-                                return (
-                                  <code 
-                                    className="px-1 py-0.5 bg-gray-100 text-pink-600 rounded text-sm font-mono"
-                                    data-language={highlightLanguage} // Using the extracted language
-                                    {...props}
-                                  >
-                                    {children}
-                                  </code>
-                                );
-                              }
-
-                              // Assign language class to the <code> element for highlighting
+                            if (inline) {
                               return (
                                 <code 
-                                  className={className}
-                                  data-language={highlightLanguage} // Using the extracted language 
+                                  className="px-1 py-0.5 bg-gray-100 text-pink-600 rounded text-sm font-mono"
+                                  data-language={highlightLanguage}
                                   {...props}
                                 >
                                   {children}
                                 </code>
                               );
-                            },
-                            
-                            // Updated pre component to handle wrapper styling
-                            pre: ({ children, ...props }: React.ComponentProps<'pre'>) => { // Remove unused node
-                                // Inspect children to determine the language (needed for theme)
-                                let language: string = ''; // Initialize with an empty string
-                                if (children && typeof children === 'object' && 'props' in children) {
-                                    // Ensure children.props exists and has className before accessing it
-                                    const childProps = (children as React.ReactElement).props as { className?: string };
-                                    const match = /language-(\w+)/.exec(childProps?.className || '');
-                                    language = match?.[1] || ''; // Assign empty string if match is null
-                                }
-
-                                // Apply theme based on language
-                                const preClassName = language === 'sql'
-                                    ? "rounded-md bg-gray-900 my-4 p-4 overflow-x-auto font-mono text-sm text-gray-100" // Dark theme for SQL <pre>
-                                    : "rounded-md bg-gray-50 my-4 p-4 overflow-x-auto font-mono text-sm text-gray-800"; // Light theme for other <pre>
-
-                                return <pre className={preClassName} {...props}>{children}</pre>;
-                            },
-                            
-                            // Other element styling
-                            blockquote: ({node, ...props}) => ( // Keep node
-                              <blockquote className="pl-4 border-l-4 border-blue-400 italic text-gray-600 my-4" {...props} />
-                            ),
-                            li: ({node, ...props}) => <li className="ml-6 my-2 list-disc" {...props} />, // Remove unused node
-                            hr: ({node, ...props}) => <hr className="my-6 border-t border-gray-300" {...props} />, // Remove unused node
-                            a: ({node, ...props}) => ( // Remove unused node
-                              <a 
-                                className="text-blue-600 hover:text-blue-800 hover:underline"
-                                target="_blank" 
-                                rel="noopener noreferrer" 
+                            }
+                            return (
+                              <code 
+                                className={className}
+                                data-language={highlightLanguage}
                                 {...props}
-                              />
-                            ),
-                            img: ({node, ...props}) => ( // Remove unused node
-                              <img 
-                                className="max-w-full h-auto rounded-lg my-4 shadow-sm" 
-                                alt={props.alt || 'Image loaded from markdown'} 
-                                {...props} 
-                              />
-                            ),
-                            p: ({node, ...props}) => <p className="my-3" {...props} />, // Remove unused node
-                            h1: ({node, ...props}) => <h1 className="text-2xl font-bold mt-6 mb-4" {...props} />, // Remove unused node
-                            h2: ({node, ...props}) => <h2 className="text-xl font-bold mt-5 mb-3" {...props} />, // Remove unused node
-                            h3: ({node, ...props}) => <h3 className="text-lg font-bold mt-4 mb-2" {...props} />, // Remove unused node
-                          }}
-                        >
-                          {msg.content}
-                        </ReactMarkdown>
-                   ) : (
-                        <div className="flex flex-col"> {/* Wrapper for stacking and alignment */}
-                          {/* Image Preview (if image) - right aligned, above text */}
-                          {msg.imageBase64Preview && msg.fileType?.startsWith('image/') && (
-                            <div className="ml-auto"> {/* Pushes the image to the right */}
-                              <img
-                                src={`data:${msg.fileType};base64,${msg.imageBase64Preview}`}
-                                alt={msg.fileName || 'User image preview'}
-                                className="mt-1 mb-1 max-h-20 w-auto rounded-md cursor-pointer hover:opacity-80 shadow-sm"
-                                onClick={() => handleOpenImageOverlay(`data:${msg.fileType};base64,${msg.imageBase64Preview}`)}
-                              />
-                            </div>
-                          )}
+                              >
+                                {children}
+                              </code>
+                            );
+                          },
+                          pre: ({ children, ...props }: React.ComponentProps<'pre'>) => {
+                            let language: string = '';
+                            if (children && typeof children === 'object' && 'props' in children) {
+                              const childProps = (children as React.ReactElement).props as { className?: string };
+                              const match = /language-(\w+)/.exec(childProps?.className || '');
+                              language = match?.[1] || '';
+                            }
+                            const preClassName = language === 'sql'
+                                ? "rounded-md bg-gray-900 my-4 p-4 overflow-x-auto font-mono text-sm text-gray-100"
+                                : "rounded-md bg-gray-50 my-4 p-4 overflow-x-auto font-mono text-sm text-gray-800";
+                            return <pre className={preClassName} {...props}>{children}</pre>;
+                          },
+                          blockquote: ({node, ...props}) => (
+                            <blockquote className="pl-4 border-l-4 border-blue-400 italic text-gray-600 my-4" {...props} />
+                          ),
+                          li: ({node, ...props}) => <li className="ml-6 my-2 list-disc" {...props} />,
+                          hr: ({node, ...props}) => <hr className="my-6 border-t border-gray-300" {...props} />,
+                          a: ({node, ...props}) => (
+                            <a 
+                              className="text-blue-600 hover:text-blue-800 hover:underline"
+                              target="_blank" 
+                              rel="noopener noreferrer" 
+                              {...props}
+                            />
+                          ),
+                          img: ({node, ...props}) => (
+                            <img 
+                              className="max-w-full h-auto rounded-lg my-4 shadow-sm" 
+                              alt={props.alt || 'Image loaded from markdown'} 
+                              {...props} 
+                            />
+                          ),
+                          p: ({node, ...props}) => <p className="my-3" {...props} />,
+                          h1: ({node, ...props}) => <h1 className="text-2xl font-bold mt-6 mb-4" {...props} />,
+                          h2: ({node, ...props}) => <h2 className="text-xl font-bold mt-5 mb-3" {...props} />,
+                          h3: ({node, ...props}) => <h3 className="text-lg font-bold mt-4 mb-2" {...props} />,
+                        }}
+                      >
+                        {msg.content}
+                      </ReactMarkdown>
 
-                          {/* Display text content if any - takes full width available in the bubble */}
-                          {msg.content && msg.content.trim() && (
-                            <div className="w-full">{msg.content}</div>
-                          )}
+                      {msg.renderedContent && (
+                        <div className="mt-3 search-suggestions-container" dangerouslySetInnerHTML={{ __html: msg.renderedContent }} />
+                      )}
 
-                          {/* Display file name for non-image, non-audio files (if not already in content) */}
-                          {!msg.imageBase64Preview &&
-                           msg.fileName &&
-                           !msg.fileType?.startsWith('audio/') &&
-                           !msg.fileType?.startsWith('image/') &&
-                           msg.content !== `(File: ${msg.fileName})` && (
-                             <div className="mt-1 text-sm opacity-70 w-full">
-                               (File: {msg.fileName})
-                             </div>
-                          )}
-
-                          {/* Existing audio player logic - takes full width available */}
-                          {msg.audioUrl && msg.fileType?.startsWith('audio/') && (
-                            <div className="mt-2 w-full">
-                              <audio
-                                src={msg.audioUrl!}
-                                controls
-                                className="max-w-full max-h-8"
-                                preload="metadata"
-                              />
-                              <div className="flex items-center justify-between mt-1">
-                                <span className="text-xs opacity-70">
-                                  {msg.fileName || "Audio recording"}
-                                </span>
-                              </div>
-                            </div>
-                          )}
+                      {!msg.renderedContent && msg.webSearchQueries && msg.webSearchQueries.length > 0 && (
+                        <div className="mt-3">
+                          <p className="text-sm font-semibold text-gray-600 mb-1">Search Suggestions:</p>
+                          <div className="flex flex-wrap gap-2">
+                            {msg.webSearchQueries.map((query, i) => (
+                              <a
+                                key={i}
+                                href={`https://www.google.com/search?q=${encodeURIComponent(query)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm hover:bg-gray-200 transition-colors shadow-sm"
+                              >
+                                {query}
+                              </a>
+                            ))}
+                          </div>
                         </div>
-              )}
-            </div>
-          </div>
-        ))}
+                      )}
+                      
+                      {msg.imageUrl && (
+                        <div className="mt-2">
+                          <img
+                            src={msg.imageUrl}
+                            alt="Generated by AI"
+                            className="max-w-md h-auto rounded-lg cursor-pointer hover:opacity-80 transition-opacity"
+                            onClick={() => msg.imageUrl && handleOpenImageOverlay(msg.imageUrl)}
+                          />
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="flex flex-col">
+                      {msg.imageBase64Preview && msg.fileType?.startsWith('image/') && (
+                        <div className="ml-auto">
+                          <img
+                            src={`data:${msg.fileType};base64,${msg.imageBase64Preview}`}
+                            alt={msg.fileName || 'User image preview'}
+                            className="mt-1 mb-1 max-h-20 w-auto rounded-md cursor-pointer hover:opacity-80 shadow-sm"
+                            onClick={() => handleOpenImageOverlay(`data:${msg.fileType};base64,${msg.imageBase64Preview}`)}
+                          />
+                        </div>
+                      )}
+
+                      {msg.content && msg.content.trim() && (
+                        <div className="w-full">{msg.content}</div>
+                      )}
+
+                      {!msg.imageBase64Preview &&
+                       msg.fileName &&
+                       !msg.fileType?.startsWith('audio/') &&
+                       !msg.fileType?.startsWith('image/') &&
+                       msg.content !== `(File: ${msg.fileName})` && (
+                         <div className="mt-1 text-sm opacity-70 w-full">
+                           (File: {msg.fileName})
+                         </div>
+                      )}
+
+                      {msg.audioUrl && msg.fileType?.startsWith('audio/') && (
+                        <div className="mt-2 w-full">
+                          <audio
+                            src={msg.audioUrl}
+                            controls
+                            className="max-w-full max-h-8"
+                            preload="metadata"
+                          />
+                          <div className="flex items-center justify-between mt-1">
+                            <span className="text-xs opacity-70">
+                              {msg.fileName || "Audio recording"}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {msg.renderedContent && (
+                        <div className="mt-3 search-suggestions-container" dangerouslySetInnerHTML={{ __html: msg.renderedContent }} />
+                      )}
+                      
+                      {!msg.renderedContent && msg.webSearchQueries && msg.webSearchQueries.length > 0 && (
+                        <div className="mt-3">
+                          <p className="text-sm font-semibold text-gray-600 mb-1">Search Suggestions:</p>
+                          <div className="flex flex-wrap gap-2">
+                            {msg.webSearchQueries.map((query, i) => (
+                              <a
+                                key={i}
+                                href={`https://www.google.com/search?q=${encodeURIComponent(query)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm hover:bg-gray-200 transition-colors shadow-sm"
+                              >
+                                {query}
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
            </div>
       </main>
 
@@ -795,22 +888,22 @@ export default function ChatPage() {
                 {/* Model Dropdown with squircle styling */}
                 <div className="relative">
                   <select 
-                    defaultValue="gemini-1.5-flash"
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
                     className="appearance-none bg-gray-200 border border-gray-300 text-gray-700 text-xs focus:ring-blue-500 focus:border-blue-500 block w-full py-1.5 pl-2 pr-7 hover:bg-gray-300 cursor-pointer"
                     style={{ borderRadius: '12px' }}
                     disabled={isLoading} 
                     title="Select AI Model"
                   >
-                    <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
-                    <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-                    <option value="gpt-4">GPT-4</option>
-                    <option value="claude-3-sonnet">Claude 3 Sonnet</option>
+                    <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                    <option value="sonar">Perplexity Sonar</option>
+                    <option value="sonar-pro">Perplexity Sonar Pro</option>
                   </select>
                   <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
                     <svg className="fill-current h-3 w-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
                   </div>
                 </div>
-
+                
                 {/* Right Side Buttons */}
                 <div className="flex items-center gap-2">
                    {/* Attachments Button with squircle styling */}

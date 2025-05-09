@@ -19,5 +19,6 @@ export interface FileUri {
 
 export interface LlmService {
   // Update signature to accept fileUri as an alternative to fileData
-  generateResponse(message: string, history?: ChatMessage[], fileData?: FileData, fileUri?: FileUri): Promise<AsyncIterable<string>>;
+  // and to yield structured objects for text and grounding information.
+  generateResponse(message: string, history?: ChatMessage[], fileData?: FileData, fileUri?: FileUri, modelName?: string): Promise<AsyncIterable<{ text?: string; webSearchQueries?: string[]; renderedContent?: string }>>;
 } 

@@ -10,7 +10,18 @@ if (!apiKey) {
 
 const genAI = new GoogleGenerativeAI(apiKey);
 
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+// Define available models
+const MODELS = {
+  "gemini-2.0-flash": { // Default model for text, audio, video, and future search/live capabilities
+    model: "gemini-2.0-flash",
+    supportsImageGeneration: false,
+    supportsLiveAPI: true, // Placeholder for future Live API integration
+    supportsGoogleSearch: true, // Placeholder for future Google Search integration
+  }
+};
+
+// Default model name
+const DEFAULT_MODEL_NAME = "gemini-2.0-flash";
 
 // Define the new detailed system instruction
 const systemInstruction = {
@@ -84,8 +95,20 @@ export class GeminiService implements LlmService {
     message: string, 
     history: ChatMessage[] = [], 
     fileData?: FileData, 
-    fileUri?: FileUri
-  ): Promise<AsyncIterable<string>> {
+    fileUri?: FileUri,
+    modelName: string = DEFAULT_MODEL_NAME // Add modelName parameter
+  ): Promise<AsyncIterable<{ text?: string; webSearchQueries?: string[]; renderedContent?: string }>> { // Updated return type
+    // Get the selected model configuration
+    const selectedModelConfig = MODELS[modelName as keyof typeof MODELS] || MODELS[DEFAULT_MODEL_NAME];
+    
+    // Prepare model parameters, including tools for grounding if supported
+    const modelParams: { model: string; tools?: any[] } = { model: selectedModelConfig.model };
+    if (selectedModelConfig.supportsGoogleSearch) {
+      modelParams.tools = [{ googleSearch: {} }];
+      console.log(`Grounding with Google Search enabled for model: ${selectedModelConfig.model}`);
+    }
+    const activeModel = genAI.getGenerativeModel(modelParams);
+
     // Map the incoming history to the format expected by the SDK
     const sdkHistory: Content[] = history.map(msg => ({
         // History coming in should already have the correct role ('user' | 'model')
@@ -111,7 +134,7 @@ export class GeminiService implements LlmService {
 
     try {
         // Start chat with history, safety settings, and system instruction
-        const chat = model.startChat(chatParams);
+        const chat = activeModel.startChat(chatParams);
 
         // Construct the parts for the current user message
         const currentUserParts: Part[] = [];
@@ -142,7 +165,7 @@ export class GeminiService implements LlmService {
             if (!fileData.base64String || fileData.base64String.length === 0) {
                 console.error("Base64 string is empty - cannot add to message");
                 return (async function*() { 
-                    yield `[Error: Invalid base64 data for ${fileType}. Please try again with a different file.]`; 
+                    yield { text: "[Error: Invalid base64 data for ${fileType}. Please try again with a different file.]" }; 
                 })();
             }
 
@@ -157,7 +180,7 @@ export class GeminiService implements LlmService {
             } catch (error) {
                 console.error(`Error adding inline ${fileType} to parts:`, error);
                 return (async function*() { 
-                    yield `[Error: Could not process ${fileType} data. Please try again.]`; 
+                    yield { text: "[Error: Could not process ${fileType} data. Please try again.]" }; 
                 })();
             }
         }
@@ -166,7 +189,8 @@ export class GeminiService implements LlmService {
         if (currentUserParts.length === 0) {
             // This case should ideally be handled by the API route, but as a safeguard:
             console.warn("Attempted to send an empty message to Gemini.");
-            return (async function*() { yield "[Error: Cannot send empty message]"; })();
+            // Adjust yield for new return type
+            return (async function*() { yield { text: "[Error: Cannot send empty message]" }; })();
         }
 
         // Extra logging for multimodal prompts
@@ -186,7 +210,8 @@ export class GeminiService implements LlmService {
         }
 
         // Get the stream by sending the constructed parts
-        console.log("Sending to Gemini API with System Instruction:", { 
+        console.log("Sending to Gemini API with System Instruction:", {
+            model: selectedModelConfig.model, // Log the model being used
             numParts: currentUserParts.length,
             messageText: message ? message.substring(0, 100) + (message.length > 100 ? "..." : "") : "(none)",
             hasFileData: !!fileData,
@@ -195,31 +220,70 @@ export class GeminiService implements LlmService {
         
         const result = await chat.sendMessageStream(currentUserParts);
         // Success - continue with normal processing
-        console.log("Successfully initiated Gemini API stream");
+        console.log(`Successfully initiated Gemini API stream with model ${selectedModelConfig.model}`);
 
         // Return an async generator that yields text chunks
         // We wrap this in another async generator to handle potential errors from the stream itself
         return (async function*() {
             try {
                 for await (const chunk of result.stream) {
-                    if (chunk.candidates && chunk.candidates.length > 0 && chunk.candidates[0].content) {
-                        const text = chunk.text(); // Helper to get text from the first candidate
-                        if (text) {
-                            yield text;
+                    // Check for text content in the chunk
+                    const textContent = chunk.text(); // text() helper gets all text from parts
+                    if (textContent) {
+                        yield { text: textContent };
+                    }
+
+                    // According to Gemini API docs, groundingMetadata (including webSearchQueries & renderedContent)
+                    // is typically part of the main candidate in the response, not necessarily streamed separately for each attribute.
+                    // We will collect it from the final response after the stream.
+                }
+
+                // After the stream has finished, get the complete response to check for grounding metadata.
+                const finalResponseData = await result.response;
+                const firstCandidate = finalResponseData.candidates?.[0];
+                
+                if (firstCandidate) {
+                    // For google_search, the metadata might be in several possible structures
+                    // Check both classic groundingMetadata and the newer structured format
+                    const groundingMetadata = firstCandidate.groundingMetadata;
+                    const searchInfo = firstCandidate.content?.parts?.find(part => part.functionCall?.name === 'google_search');
+                    
+                    if (groundingMetadata) {
+                        const webSearchQueries = groundingMetadata.webSearchQueries?.length ? groundingMetadata.webSearchQueries : undefined;
+                        const renderedContent = groundingMetadata.searchEntryPoint?.renderedContent;
+
+                        if (webSearchQueries || renderedContent) {
+                            console.log("Grounding metadata found in groundingMetadata:", { webSearchQueries, hasRenderedContent: !!renderedContent });
+                            yield { webSearchQueries: webSearchQueries, renderedContent: renderedContent };
                         }
-                    } else {
-                        // Handle cases where the chunk might be empty or blocked mid-stream
-                        const blockReason = chunk.promptFeedback?.blockReason;
-                        console.warn(`Stream chunk blocked or empty. Reason: ${blockReason || 'Unknown'}`);
-                        // Optionally yield a marker or handle differently if needed
+                    } 
+                    // Alternative path for newer API structure
+                    else if (searchInfo && searchInfo.functionCall && 
+                            typeof searchInfo.functionCall === 'object' && 
+                            searchInfo.functionCall !== null &&
+                            'args' in searchInfo.functionCall && 
+                            typeof searchInfo.functionCall.args === 'object' &&
+                            searchInfo.functionCall.args !== null &&
+                            'searchResults' in searchInfo.functionCall.args) {
+                        try {
+                            const functionArgs = searchInfo.functionCall.args as {searchResults: string};
+                            const searchResults = JSON.parse(functionArgs.searchResults);
+                            if (Array.isArray(searchResults) && searchResults.length > 0) {
+                                // Extract search query from the results
+                                const webSearchQueries = [searchResults[0].query || "Related search"];
+                                console.log("Grounding metadata found in functionCall:", { webSearchQueries });
+                                yield { webSearchQueries };
+                            }
+                        } catch (parseError) {
+                            console.error("Error parsing search results:", parseError);
+                        }
                     }
                 }
+
             } catch (streamError) {
                 console.error("Error processing Gemini stream:", streamError);
-                // Depending on requirements, you might yield an error message or re-throw
-                yield "\n\n[Error processing response stream]";
-                // Or re-throw if the API route should handle it:
-                // throw new Error("Failed to process AI response stream.");
+                // Adjust yield for new return type
+                yield { text: "\n\n[Error processing response stream]" };
             }
         })(); // Immediately invoke the async generator function
 
@@ -227,9 +291,18 @@ export class GeminiService implements LlmService {
       console.error("Error initiating chat stream with Gemini:", error);
       // Rethrow or handle initial setup errors appropriately
       if (error instanceof Error) {
-          throw new Error(`Failed to initiate stream: ${error.message}`);
+          // Add more specific error handling for API key issues if not already covered
+          if (error.message.includes("API_KEY_INVALID") || error.message.includes("API key not valid")) {
+               throw new Error(`Failed to initiate stream: Invalid or missing API Key. Please check your GEMINI_API_KEY environment variable.`);
+          }
+          // Handle model access issues - specifically for preview models
+          if (error.message.includes("Developer instruction is not enabled") || 
+              error.message.includes("not enabled for models")) {
+               throw new Error(`Access to model ${selectedModelConfig.model} is restricted. This preview model may require special access. Try using gemini-2.0-flash instead.`);
+          }
+          throw new Error(`Failed to initiate stream with ${selectedModelConfig.model}: ${error.message}`);
       } else {
-          throw new Error(`An unexpected error occurred initiating stream: ${String(error)}`);
+          throw new Error(`An unexpected error occurred initiating stream with ${selectedModelConfig.model}: ${String(error)}`);
       }
     }
   }

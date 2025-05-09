@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { GeminiService } from '@/lib/llm/gemini'; // Using path alias '@'
-import { ChatMessage, FileData, FileUri } from '@/lib/llm/interface'; // Import FileUri
+import { PerplexityService } from '@/lib/llm/perplexity'; // Import the Perplexity service
+import { ChatMessage, FileData, FileUri, LlmService } from '@/lib/llm/interface'; // Import LlmService
 
 // Type for messages coming from the frontend
 interface FrontendMessage {
@@ -8,8 +9,17 @@ interface FrontendMessage {
     content: string;
 }
 
-// Instantiate the service once
+// Instantiate services
 const geminiService = new GeminiService();
+const perplexityService = new PerplexityService();
+
+// Helper function to select the appropriate service based on model name
+function getServiceForModel(modelName: string): LlmService {
+  if (modelName.startsWith('sonar')) {
+    return perplexityService;
+  }
+  return geminiService; // Default to Gemini
+}
 
 export async function POST(request: Request) {
   try {
@@ -32,6 +42,9 @@ export async function POST(request: Request) {
     const base64String = formData.get('base64') as string | null;
     const convertedMimeType = formData.get('convertedType') as string | null;
     
+    // Get modelName from formData
+    const modelName = formData.get('modelName') as string | null;
+
     console.log("Parameters received:", {
       hasMessage: !!message,
       messageLength: message?.length,
@@ -39,7 +52,8 @@ export async function POST(request: Request) {
       hasFile: !!file,
       hasFileUri: !!fileUriString,
       hasBase64: !!base64String,
-      convertedMimeType
+      convertedMimeType,
+      modelName
     });
 
     // Require at least a message, a file, or a fileUri
@@ -107,44 +121,85 @@ export async function POST(request: Request) {
       console.log("Warning: No file data or URI was processed successfully");
     }
 
+    // Select the appropriate service based on model name
+    const selectedService = getServiceForModel(modelName || '');
+    
+    // Detect if we're using Perplexity (which doesn't support file uploads)
+    const isPerplexity = modelName?.startsWith('sonar') || false;
+    if (isPerplexity && (fileData || fileUri)) {
+      console.warn("Perplexity API doesn't support file uploads. Ignoring attached file.");
+      // We don't clear fileData/fileUri here to avoid code changes, but we won't pass them to Perplexity
+    }
+
     // Get the async iterable stream from the service, passing file data if available
-    console.log("Calling geminiService.generateResponse with:", {
+    console.log("Calling service.generateResponse with:", {
       messageLength: (message || "").length,
       historyLength: serviceHistory.length,
       hasFileData: !!fileData,
       fileDataType: fileData?.mimeType,
-      hasFileUri: !!fileUri
+      hasFileUri: !!fileUri,
+      modelName,
+      serviceType: isPerplexity ? 'Perplexity' : 'Gemini'
     });
     
-    const stream = await geminiService.generateResponse(message ?? '', serviceHistory, fileData, fileUri);
+    try {
+      // For Perplexity, don't pass file data
+      const stream = isPerplexity 
+        ? await selectedService.generateResponse(message ?? '', serviceHistory, undefined, undefined, modelName ?? undefined)
+        : await selectedService.generateResponse(message ?? '', serviceHistory, fileData, fileUri, modelName ?? undefined);
 
-    // Create a ReadableStream to send to the client
-    const readableStream = new ReadableStream({
-      async start(controller) {
-        const encoder = new TextEncoder();
-        try {
-          for await (const chunk of stream) {
-            controller.enqueue(encoder.encode(chunk));
+      // Create a ReadableStream to send to the client
+      const readableStream = new ReadableStream({
+        async start(controller) {
+          const encoder = new TextEncoder();
+          try {
+            for await (const payloadChunk of stream) {
+              // Serialize the object to a JSON string and encode it
+              // Each JSON object will be on its own line to make it easier for client to parse (ndjson-like)
+              controller.enqueue(encoder.encode(JSON.stringify(payloadChunk) + '\n'));
+            }
+            controller.close();
+          } catch (error) {
+            console.error("Error reading from service stream:", error);
+            // Send error message to client rather than crashing
+            const errorPayload = { text: `[Error: ${error instanceof Error ? error.message : 'Unknown streaming error'}]` };
+            controller.enqueue(encoder.encode(JSON.stringify(errorPayload) + '\n'));
+            controller.close();
           }
-          controller.close();
-        } catch (error) {
-          console.error("Error reading from service stream:", error);
-          controller.error(error);
+        },
+        cancel() {
+          console.log("Stream cancelled by client.");
         }
-      },
-      cancel() {
-        console.log("Stream cancelled by client.");
+      });
+
+      // Return the stream response
+      return new Response(readableStream, {
+        headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
+      });
+
+    } catch (error) {
+      console.error("API Route Error (Stream Setup):", error);
+      // Return a non-streaming error response for setup issues
+      let errorMessage = 'Internal Server Error';
+      const statusCode = 500; // Use const as it's not reassigned
+      if (error instanceof Error) {
+          errorMessage = error.message; // Use the error message from the service
+          if (errorMessage.includes("API Key")) {
+               // Check which API key is missing
+               if (isPerplexity) {
+                 errorMessage = 'Server configuration error: Missing Perplexity API Key.';
+               } else {
+                 errorMessage = 'Server configuration error: Missing Gemini API Key.';
+               }
+          }
+          // Add more specific status codes if needed based on error messages
       }
-    });
 
-    // Return the stream response
-    return new Response(readableStream, {
-      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-    });
-
+      return NextResponse.json({ error: errorMessage }, { status: statusCode });
+    }
   } catch (error) {
-    console.error("API Route Error (Stream Setup):", error);
-    // Return a non-streaming error response for setup issues
+    console.error("API Route Error (Main):", error);
+    // Return a non-streaming error response for main issues
     let errorMessage = 'Internal Server Error';
     const statusCode = 500; // Use const as it's not reassigned
     if (error instanceof Error) {

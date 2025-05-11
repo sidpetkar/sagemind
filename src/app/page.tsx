@@ -78,6 +78,8 @@ export default function ChatPage() {
   const [selectedModel, setSelectedModel] = useState<string>('gemini-2.0-flash'); // Default model
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState<boolean>(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null); // Ref for the main chat container
+  const messagesEndRef = useRef<HTMLDivElement>(null); // Ref for the end of messages list
 
   // --- Image Overlay State ---
   const [isImageOverlayOpen, setIsImageOverlayOpen] = useState<boolean>(false);
@@ -101,6 +103,11 @@ export default function ChatPage() {
   // Add state for tracking mouse movement in chat container
   const [isMouseMoving, setIsMouseMoving] = useState<boolean>(false);
   const mouseTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const programmaticScrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const userScrollInactivityTimerRef = useRef<NodeJS.Timeout | null>(null); // Timer for user scroll inactivity
+
+  // State for managing auto-scroll behavior
+  const [isAutoScrollingPaused, setIsAutoScrollingPaused] = useState<boolean>(false);
 
   // Track mouse movement in chat container with more reliable implementation
   const handleMouseMove = () => {
@@ -137,6 +144,13 @@ export default function ChatPage() {
       
       if (mouseTimerRef.current) {
         clearTimeout(mouseTimerRef.current);
+      }
+      if (programmaticScrollTimeoutRef.current) {
+        clearTimeout(programmaticScrollTimeoutRef.current);
+        // No need to nullify here as the effect's own cleanup/logic will handle it
+      }
+      if (userScrollInactivityTimerRef.current) { // Clean up inactivity timer on unmount
+        clearTimeout(userScrollInactivityTimerRef.current);
       }
     };
   }, []);
@@ -525,6 +539,18 @@ export default function ChatPage() {
 
     setMessages((prevMessages) => [...prevMessages, newUserMessage]);
     setInputValue('');
+    
+    // --- Auto-scroll logic on new user message --- 
+    setIsAutoScrollingPaused(false); // Resume auto-scrolling for new messages
+    if (programmaticScrollTimeoutRef.current) clearTimeout(programmaticScrollTimeoutRef.current);
+    programmaticScrollTimeoutRef.current = setTimeout(() => {
+        if (messagesEndRef.current) {
+            messagesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        }
+        programmaticScrollTimeoutRef.current = null; // Clear the ref after scroll
+    }, 50); // Short delay to ensure new message is rendered
+    // --- End auto-scroll logic ---
+
     // After submit, reset textarea height to 1 line equivalent
     if (textareaRef.current) {
         const ta = textareaRef.current;
@@ -717,6 +743,88 @@ export default function ChatPage() {
     setError(null);
   };
 
+  // Effect for auto-scrolling to the bottom when messages change and auto-scroll is not paused
+  useEffect(() => {
+    if (!isAutoScrollingPaused && isLoading && messagesEndRef.current) {
+      // If a scroll is already pending, clear it to avoid queuing multiple scrolls
+      if (programmaticScrollTimeoutRef.current) {
+        clearTimeout(programmaticScrollTimeoutRef.current);
+      }
+
+      // Set a new timeout. This ID will be stored in programmaticScrollTimeoutRef.current.
+      // handleChatScroll will see this non-null ref and ignore the scroll events
+      // caused by the scrollIntoView call.
+      programmaticScrollTimeoutRef.current = setTimeout(() => {
+        // Re-check conditions like isAutoScrollingPaused inside the timeout,
+        // as state might have changed during the timeout delay.
+        if (messagesEndRef.current && !isAutoScrollingPaused && isLoading) {
+          messagesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        }
+
+        // After the scrollIntoView is initiated, we need to clear programmaticScrollTimeoutRef.current
+        // so that subsequent USER scrolls are not ignored.
+        // This should happen after a delay that is long enough for the 'smooth' scroll
+        // animation to complete and its scroll events to be processed and ignored.
+        const clearRefDelay = 200; // Adjusted delay for smooth scroll completion
+        setTimeout(() => {
+          programmaticScrollTimeoutRef.current = null;
+        }, clearRefDelay);
+
+      }, 50); // A small delay before initiating the scroll.
+
+      // Cleanup function for the effect
+      return () => {
+        if (programmaticScrollTimeoutRef.current) {
+          clearTimeout(programmaticScrollTimeoutRef.current);
+          programmaticScrollTimeoutRef.current = null;
+        }
+      };
+    }
+  }, [messages, isLoading, isAutoScrollingPaused]);
+
+  // Scroll handler for the chat container to detect user scrolls
+  const handleChatScroll = () => {
+    if (programmaticScrollTimeoutRef.current) {
+      return;
+    }
+
+    const container = chatContainerRef.current;
+    if (container) {
+      const scrollThreshold = 30; 
+      const isNearBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < scrollThreshold;
+
+      // Always clear the inactivity timer on any user scroll action
+      if (userScrollInactivityTimerRef.current) {
+        clearTimeout(userScrollInactivityTimerRef.current);
+        userScrollInactivityTimerRef.current = null;
+      }
+
+      if (!isNearBottom) {
+        // User has scrolled up. Pause auto-scrolling.
+        if (!isAutoScrollingPaused) { // Set pause only if not already paused
+          setIsAutoScrollingPaused(true);
+        }
+        
+        // Start a timer: if user remains inactive, resume auto-scroll
+        userScrollInactivityTimerRef.current = setTimeout(() => {
+          // Check if still paused and user hasn't scrolled back to bottom manually during the timeout
+          const stillScrolledUp = (container.scrollHeight - container.scrollTop - container.clientHeight) >= scrollThreshold;
+          if (isAutoScrollingPaused && stillScrolledUp) {
+            setIsAutoScrollingPaused(false); // This will trigger useEffect to scroll if needed
+          }
+          userScrollInactivityTimerRef.current = null;
+        }, 1500); // 1.5 seconds of inactivity
+
+      } else {
+        // User is at or has scrolled back to the bottom. Resume auto-scrolling.
+        if (isAutoScrollingPaused) { // Resume only if it was paused
+          setIsAutoScrollingPaused(false);
+        }
+        // No need to start an inactivity timer if user is already at the bottom
+      }
+    }
+  };
+
   return (
     // Outermost div for full-width background - MODIFIED FOR NATIVE-LIKE VIEWPORT HANDLING
     <div className="w-full bg-gray-50 fixed inset-0 flex flex-col">
@@ -731,9 +839,11 @@ export default function ChatPage() {
 
         {/* Main content - Relative positioning for overlay - MODIFIED FOR NATIVE-LIKE VIEWPORT HANDLING */}
         <main 
+          ref={chatContainerRef} // Assign ref to the main chat container
           className="relative flex-grow overflow-y-auto min-h-0 chat-container"
-          style={{ overflowX: 'hidden', overscrollBehaviorY: 'contain' }} // Added overscroll-behavior-y
+          style={{ overflowX: 'hidden', overscrollBehaviorY: 'contain' }}
           onMouseMove={handleMouseMove}
+          onScroll={handleChatScroll} // Add scroll event listener
         >
            {/* Fade Overlay */}
            <div 
@@ -768,7 +878,7 @@ export default function ChatPage() {
                         rehypePlugins={[rehypeRaw, rehypeSanitize, rehypeHighlight]}
                         components={{
                           table: ({node, ...props}) => (
-                            <div className="my-6 overflow-x-auto rounded-lg border border-gray-300">
+                            <div className="my-6 overflow-x-auto rounded-2xl border border-gray-300">
                               <table className="min-w-full" {...props} />
                             </div>
                           ),
@@ -969,6 +1079,8 @@ export default function ChatPage() {
                 </div>
               </div>
             ))}
+            {/* Empty div at the end of messages to scroll to */}
+            <div ref={messagesEndRef} style={{ height: '1px' }} />
            </div>
       </main>
 

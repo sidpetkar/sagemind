@@ -26,7 +26,43 @@ interface Message {
   imageUrl?: string; // For AI-generated images
   webSearchQueries?: string[]; // For Google Search grounded queries
   renderedContent?: string; // For Google Search rendered suggestions
+  sourceCitations?: string[]; // Array of source URLs for citations
 }
+
+// Helper function to process text and make citation markers clickable
+const processCitationMarkers = (text: string, citations?: string[]): React.ReactNode => {
+  if (!citations || citations.length === 0) return text;
+  
+  // Split text by citation markers [n]
+  const parts = text.split(/(\[\d+\])/g);
+  
+  return parts.map((part, i) => {
+    // Check if this part is a citation marker
+    const match = part.match(/\[(\d+)\]/);
+    if (match) {
+      const citationNumber = parseInt(match[1], 10);
+      const index = citationNumber - 1; // Convert to 0-based index
+      
+      // If we have a citation URL for this index, make it a link
+      if (index >= 0 && index < citations.length) {
+        return (
+          <a 
+            key={i}
+            href={citations[index]}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-600 hover:text-blue-800 hover:underline"
+          >
+            {part}
+          </a>
+        );
+      }
+    }
+    
+    // Return regular text for non-citation parts
+    return part;
+  });
+};
 
 export default function ChatPage() {
   const [inputValue, setInputValue] = useState<string>('');
@@ -36,11 +72,12 @@ export default function ChatPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null); // Ref for textarea
-  const [textareaRows, setTextareaRows] = useState(1); // State for dynamic rows
   const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false); // State for drag-over visual cue
 
   // --- Model Selection State ---
   const [selectedModel, setSelectedModel] = useState<string>('gemini-2.0-flash'); // Default model
+  const [isModelDropdownOpen, setIsModelDropdownOpen] = useState<boolean>(false);
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
 
   // --- Image Overlay State ---
   const [isImageOverlayOpen, setIsImageOverlayOpen] = useState<boolean>(false);
@@ -61,15 +98,114 @@ export default function ChatPage() {
   } | null>(null);
   // --- End File Upload URI State ---
 
+  // Add state for tracking mouse movement in chat container
+  const [isMouseMoving, setIsMouseMoving] = useState<boolean>(false);
+  const mouseTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Track mouse movement in chat container with more reliable implementation
+  const handleMouseMove = () => {
+    const chatContainer = document.querySelector('.chat-container');
+    if (chatContainer) {
+      chatContainer.classList.add('scrollbar-visible');
+      
+      // Clear any existing timer
+      if (mouseTimerRef.current) {
+        clearTimeout(mouseTimerRef.current);
+      }
+      
+      // Set a timer to hide the scrollbar after 1 second of inactivity
+      mouseTimerRef.current = setTimeout(() => {
+        chatContainer.classList.remove('scrollbar-visible');
+      }, 1000);
+    }
+  };
+
+  // Initialize mouse movement handler on component mount
+  useEffect(() => {
+    const chatContainer = document.querySelector('.chat-container');
+    
+    if (chatContainer) {
+      chatContainer.addEventListener('mousemove', handleMouseMove);
+      chatContainer.addEventListener('scroll', handleMouseMove);
+    }
+    
+    return () => {
+      if (chatContainer) {
+        chatContainer.removeEventListener('mousemove', handleMouseMove);
+        chatContainer.removeEventListener('scroll', handleMouseMove);
+      }
+      
+      if (mouseTimerRef.current) {
+        clearTimeout(mouseTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(event.target as Node)) {
+        setIsModelDropdownOpen(false);
+      }
+    }
+    
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+
+  // Define the model options
+  const modelOptions = [
+    { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+    { value: 'meta-llama/Llama-Vision-Free', label: 'Llama Vision' },
+    { value: 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free', label: 'Llama 3.3 Instruct' },
+    { value: 'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free', label: 'DeepSeek R1' },
+    { value: 'sonar', label: 'Perplexity Sonar' },
+    { value: 'sonar-pro', label: 'Perplexity Sonar Pro' },
+  ];
+
+  // Find the current model label
+  const currentModelLabel = modelOptions.find(option => option.value === selectedModel)?.label || selectedModel;
+
   // Effect to adjust textarea height
   useEffect(() => {
     if (textareaRef.current) {
-      // Reset rows to 1 to calculate scrollHeight correctly
-      textareaRef.current.rows = 1;
-      const scrollHeight = textareaRef.current.scrollHeight;
-      const lineHeight = parseInt(getComputedStyle(textareaRef.current).lineHeight);
-      const newRows = Math.min(4, Math.max(1, Math.ceil(scrollHeight / lineHeight)));
-      setTextareaRows(newRows);
+      const ta = textareaRef.current;
+      ta.style.height = 'auto'; // Reset to measure natural scrollHeight
+
+      requestAnimationFrame(() => {
+        if (!textareaRef.current) return;
+
+        const computedStyle = getComputedStyle(ta);
+        const paddingTop = parseFloat(computedStyle.paddingTop) || 0;
+        const paddingBottom = parseFloat(computedStyle.paddingBottom) || 0;
+        let lineHeight = parseFloat(computedStyle.lineHeight);
+
+        if (isNaN(lineHeight) || lineHeight <= 0) {
+          const fontSize = parseFloat(computedStyle.fontSize);
+          lineHeight = (!isNaN(fontSize) && fontSize > 0) ? fontSize * 1.5 : 24;
+        }
+        lineHeight = Math.max(1, lineHeight); // Ensure positive
+
+        const oneLinePixelHeightWithPadding = lineHeight + paddingTop + paddingBottom;
+        const fourLinesPixelHeightWithPadding = (lineHeight * 4) + paddingTop + paddingBottom;
+        const currentScrollHeight = ta.scrollHeight; // This includes padding
+
+        if (ta.value === '') {
+          ta.style.height = `${oneLinePixelHeightWithPadding}px`;
+        } else {
+          let targetPixelHeight = currentScrollHeight;
+
+          // Cap at 4 lines worth of height
+          targetPixelHeight = Math.min(targetPixelHeight, fourLinesPixelHeightWithPadding);
+          
+          // Ensure it's at least 1 line high
+          targetPixelHeight = Math.max(targetPixelHeight, oneLinePixelHeightWithPadding);
+          
+          ta.style.height = `${targetPixelHeight}px`;
+        }
+      });
     }
   }, [inputValue]);
 
@@ -377,8 +513,8 @@ export default function ChatPage() {
       ...(uploadedFileInfo && {
         fileType: uploadedFileInfo.originalType,
         fileName: uploadedFileInfo.name,
-        // Add base64 preview for images shown on user side
-        ...(uploadedFileInfo.originalType.startsWith('image/') && { imageBase64Preview: `data:${uploadedFileInfo.originalType};base64,${uploadedFileInfo.base64}` })
+        // Store only the raw base64 data for images
+        ...(uploadedFileInfo.originalType.startsWith('image/') && { imageBase64Preview: uploadedFileInfo.base64 })
       }),
       ...(audioUrl && selectedFile && { // If there was a recording
         audioUrl: audioUrl,
@@ -389,7 +525,20 @@ export default function ChatPage() {
 
     setMessages((prevMessages) => [...prevMessages, newUserMessage]);
     setInputValue('');
-    setTextareaRows(1);
+    // After submit, reset textarea height to 1 line equivalent
+    if (textareaRef.current) {
+        const ta = textareaRef.current;
+        const computedStyle = getComputedStyle(ta);
+        const paddingTop = parseFloat(computedStyle.paddingTop) || 0;
+        const paddingBottom = parseFloat(computedStyle.paddingBottom) || 0;
+        let lineHeight = parseFloat(computedStyle.lineHeight);
+        if (isNaN(lineHeight) || lineHeight <= 0) {
+            const fontSize = parseFloat(computedStyle.fontSize); 
+            lineHeight = (!isNaN(fontSize) && fontSize > 0) ? fontSize * 1.5 : 24;
+        }
+        lineHeight = Math.max(1, lineHeight);
+        ta.style.height = `${lineHeight + paddingTop + paddingBottom}px`;
+    }
     setSelectedFile(null);
     setAudioUrl(null); // Clear audio preview from input
 
@@ -449,6 +598,7 @@ export default function ChatPage() {
       let accumulatedResponse = '';
       let currentWebSearchQueries: string[] | undefined = undefined;
       let currentRenderedContent: string | undefined = undefined;
+      let currentSourceCitations: string[] | undefined = undefined;
       const buffer = '' // Buffer for incomplete JSON strings
 
       while (!done) {
@@ -464,13 +614,24 @@ export default function ChatPage() {
               const payload = JSON.parse(jsonObjStr);
 
               if (payload.text) {
-                accumulatedResponse += payload.text;
+                // Handle initial text content that might be oddly formatted
+                if (accumulatedResponse === '' && payload.text.trim() !== '') {
+                  // For first chunk, ensure we don't have leading whitespace issues
+                  const cleanedText = payload.text.trimStart();
+                  accumulatedResponse = cleanedText;
+                } else {
+                  accumulatedResponse += payload.text;
+                }
               }
+              
               if (payload.webSearchQueries) {
                 currentWebSearchQueries = payload.webSearchQueries;
               }
               if (payload.renderedContent) {
                 currentRenderedContent = payload.renderedContent;
+              }
+              if (payload.sourceCitations) {
+                currentSourceCitations = payload.sourceCitations;
               }
 
               // Update the content of the placeholder AI message
@@ -482,6 +643,7 @@ export default function ChatPage() {
                         content: accumulatedResponse,
                         webSearchQueries: currentWebSearchQueries || updatedMessages[aiMessageIndex].webSearchQueries,
                         renderedContent: currentRenderedContent || updatedMessages[aiMessageIndex].renderedContent,
+                        sourceCitations: currentSourceCitations || updatedMessages[aiMessageIndex].sourceCitations,
                     };
                 }
                 return updatedMessages;
@@ -536,21 +698,43 @@ export default function ChatPage() {
     }
   };
 
+  // Define model capabilities
+  const modelCapabilities: Record<string, { hasAttachment?: boolean; hasMic?: boolean }> = {
+    'gemini-2.0-flash': { hasAttachment: true, hasMic: true },
+    'meta-llama/Llama-Vision-Free': { hasAttachment: true, hasMic: false },
+    'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free': { hasAttachment: false, hasMic: false },
+    'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free': { hasAttachment: false, hasMic: false },
+    'sonar': { hasAttachment: false, hasMic: false },
+    'sonar-pro': { hasAttachment: false, hasMic: false },
+  };
+
+  // Modify the dropdown click handler to prevent error display
+  const handleModelDropdownToggle = (e: React.MouseEvent) => {
+    e.preventDefault(); // Prevent default behavior
+    e.stopPropagation(); // Stop event propagation
+    setIsModelDropdownOpen(!isModelDropdownOpen);
+    // Clear any error that might be showing
+    setError(null);
+  };
+
   return (
-    // Outermost div for full-width background
-    <div className="w-full min-h-screen bg-gray-50">
-      {/* Inner wrapper to constrain and center content */}
-      <div className="max-w-3xl mx-auto flex flex-col h-screen">
-        {/* Header - Solid Background, No Border */}
+    // Outermost div for full-width background - MODIFIED FOR NATIVE-LIKE VIEWPORT HANDLING
+    <div className="w-full bg-gray-50 fixed inset-0 flex flex-col">
+      {/* Inner wrapper to constrain and center content - MODIFIED FOR NATIVE-LIKE VIEWPORT HANDLING */}
+      <div className="max-w-3xl mx-auto flex flex-col h-full w-full">
+        {/* Header - Solid Background, No Border - REMAINS flex-shrink: 0 implicitly */}
         <header 
           className="bg-gray-50 pt-3 pb-3 sm:pt-4 sm:pb-4 text-center z-10 flex-shrink-0"
-          // Header background needs to match chat area bg again
         >
           <h1 className="text-lg sm:text-xl font-semibold text-gray-800">SageMind</h1>
-      </header>
+        </header>
 
-        {/* Main content - Relative positioning for overlay */}
-        <main className="relative flex-grow overflow-y-auto min-h-0">
+        {/* Main content - Relative positioning for overlay - MODIFIED FOR NATIVE-LIKE VIEWPORT HANDLING */}
+        <main 
+          className="relative flex-grow overflow-y-auto min-h-0 chat-container"
+          style={{ overflowX: 'hidden', overscrollBehaviorY: 'contain' }} // Added overscroll-behavior-y
+          onMouseMove={handleMouseMove}
+        >
            {/* Fade Overlay */}
            <div 
              className="sticky top-0 left-0 right-0 h-16 bg-gradient-to-b from-gray-50 to-transparent pointer-events-none z-5"
@@ -584,28 +768,35 @@ export default function ChatPage() {
                         rehypePlugins={[rehypeRaw, rehypeSanitize, rehypeHighlight]}
                         components={{
                           table: ({node, ...props}) => (
-                            <div className="my-6 overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
-                              <table className="min-w-full divide-y divide-gray-200 bg-white" {...props} />
+                            <div className="my-6 overflow-x-auto rounded-lg border border-gray-300">
+                              <table className="min-w-full" {...props} />
                             </div>
                           ),
                           thead: ({node, ...props}) => (
                             <thead className="bg-gray-100" {...props} />
                           ),
                           th: ({node, ...props}) => (
-                            <th 
-                              className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-r last:border-r-0" 
-                              {...props} 
+                            <th
+                              className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-r last:border-r-0 border-gray-200"
+                              {...props}
                             />
                           ),
                           tbody: ({node, ...props}) => (
-                            <tbody className="bg-white divide-y divide-gray-200" {...props} />
+                            <tbody className="" {...props} />
                           ),
                           tr: ({node, ...props}) => (
-                            <tr className="hover:bg-blue-50 transition-colors" {...props} />
+                            <tr className="hover:bg-gray-100 transition-colors" {...props} />
                           ),
                           td: ({node, ...props}) => (
-                            <td className="px-4 py-3 text-sm text-gray-700 border-r last:border-r-0" {...props} />
+                            <td className="px-4 py-3 text-sm text-gray-700 border-b border-r last:border-r-0 border-gray-200" {...props} />
                           ),
+                          // Custom text component to handle the citation links directly in markdown
+                          text: ({children}) => {
+                            if (typeof children === 'string' && msg.sourceCitations?.length) {
+                              return <>{processCitationMarkers(children, msg.sourceCitations)}</>;
+                            }
+                            return <>{children}</>;
+                          },
                           code: ({ inline, className, children, ...props }: React.ComponentProps<'code'> & { inline?: boolean }) => { 
                             const match = /language-(\w+)/.exec(className || '');
                             const highlightLanguage = match?.[1] || '';
@@ -613,7 +804,7 @@ export default function ChatPage() {
                             if (inline) {
                               return (
                                 <code 
-                                  className="px-1 py-0.5 bg-gray-100 text-pink-600 rounded text-sm font-mono"
+                                  className="px-1 py-0.5 bg-gray-100 text-pink-600 rounded text-sm font-mono overflow-wrap-break-word"
                                   data-language={highlightLanguage}
                                   {...props}
                                 >
@@ -623,7 +814,7 @@ export default function ChatPage() {
                             }
                             return (
                               <code 
-                                className={className}
+                                className={`${className} overflow-wrap-break-word`}
                                 data-language={highlightLanguage}
                                 {...props}
                               >
@@ -639,18 +830,18 @@ export default function ChatPage() {
                               language = match?.[1] || '';
                             }
                             const preClassName = language === 'sql'
-                                ? "rounded-md bg-gray-900 my-4 p-4 overflow-x-auto font-mono text-sm text-gray-100"
-                                : "rounded-md bg-gray-50 my-4 p-4 overflow-x-auto font-mono text-sm text-gray-800";
-                            return <pre className={preClassName} {...props}>{children}</pre>;
+                                ? "rounded-md bg-gray-900 my-4 p-4 font-mono text-sm text-gray-100"
+                                : "rounded-md bg-gray-50 my-4 p-4 font-mono text-sm text-gray-800";
+                            return <pre className={`${preClassName} whitespace-pre-wrap word-break-all overflow-x-hidden`} {...props}>{children}</pre>;
                           },
                           blockquote: ({node, ...props}) => (
-                            <blockquote className="pl-4 border-l-4 border-blue-400 italic text-gray-600 my-4" {...props} />
+                            <blockquote className="pl-4 border-l-4 border-blue-400 italic text-gray-600 my-4 overflow-wrap-break-word" {...props} />
                           ),
-                          li: ({node, ...props}) => <li className="ml-6 my-2 list-disc" {...props} />,
+                          li: ({node, ...props}) => <li className="ml-6 my-2 list-disc overflow-wrap-break-word" {...props} />,
                           hr: ({node, ...props}) => <hr className="my-6 border-t border-gray-300" {...props} />,
                           a: ({node, ...props}) => (
                             <a 
-                              className="text-blue-600 hover:text-blue-800 hover:underline"
+                              className="text-blue-600 hover:text-blue-800 hover:underline overflow-wrap-break-word"
                               target="_blank" 
                               rel="noopener noreferrer" 
                               {...props}
@@ -663,10 +854,10 @@ export default function ChatPage() {
                               {...props} 
                             />
                           ),
-                          p: ({node, ...props}) => <p className="my-3" {...props} />,
-                          h1: ({node, ...props}) => <h1 className="text-2xl font-bold mt-6 mb-4" {...props} />,
-                          h2: ({node, ...props}) => <h2 className="text-xl font-bold mt-5 mb-3" {...props} />,
-                          h3: ({node, ...props}) => <h3 className="text-lg font-bold mt-4 mb-2" {...props} />,
+                          p: ({node, ...props}) => <p className="my-3 overflow-wrap-break-word" {...props} />,
+                          h1: ({node, ...props}) => <h1 className="text-2xl font-bold mt-6 mb-4 overflow-wrap-break-word" {...props} />,
+                          h2: ({node, ...props}) => <h2 className="text-xl font-bold mt-5 mb-3 overflow-wrap-break-word" {...props} />,
+                          h3: ({node, ...props}) => <h3 className="text-lg font-bold mt-4 mb-2 overflow-wrap-break-word" {...props} />,
                         }}
                       >
                         {msg.content}
@@ -677,17 +868,18 @@ export default function ChatPage() {
                       )}
 
                       {!msg.renderedContent && msg.webSearchQueries && msg.webSearchQueries.length > 0 && (
-                        <div className="mt-3">
+                        <div className="mt-3 search-suggestions-container">
                           <p className="text-sm font-semibold text-gray-600 mb-1">Search Suggestions:</p>
-                          <div className="flex flex-wrap gap-2">
+                          <div className="flex flex-wrap gap-2" role="list">
                             {msg.webSearchQueries.map((query, i) => (
                               <a
                                 key={i}
                                 href={`https://www.google.com/search?q=${encodeURIComponent(query)}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm hover:bg-gray-200 transition-colors shadow-sm"
+                                className="search-chip"
                               >
+                                <img src="https://www.google.com/favicon.ico" alt="Google" />
                                 {query}
                               </a>
                             ))}
@@ -714,7 +906,7 @@ export default function ChatPage() {
                             src={`data:${msg.fileType};base64,${msg.imageBase64Preview}`}
                             alt={msg.fileName || 'User image preview'}
                             className="mt-1 mb-1 max-h-20 w-auto rounded-md cursor-pointer hover:opacity-80 shadow-sm"
-                            onClick={() => handleOpenImageOverlay(`data:${msg.fileType};base64,${msg.imageBase64Preview}`)}
+                            onClick={() => msg.imageBase64Preview && msg.fileType && handleOpenImageOverlay(`data:${msg.fileType};base64,${msg.imageBase64Preview}`)}
                           />
                         </div>
                       )}
@@ -754,17 +946,18 @@ export default function ChatPage() {
                       )}
                       
                       {!msg.renderedContent && msg.webSearchQueries && msg.webSearchQueries.length > 0 && (
-                        <div className="mt-3">
+                        <div className="mt-3 search-suggestions-container">
                           <p className="text-sm font-semibold text-gray-600 mb-1">Search Suggestions:</p>
-                          <div className="flex flex-wrap gap-2">
+                          <div className="flex flex-wrap gap-2" role="list">
                             {msg.webSearchQueries.map((query, i) => (
                               <a
                                 key={i}
                                 href={`https://www.google.com/search?q=${encodeURIComponent(query)}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm hover:bg-gray-200 transition-colors shadow-sm"
+                                className="search-chip"
                               >
+                                <img src="https://www.google.com/favicon.ico" alt="Google" />
                                 {query}
                               </a>
                             ))}
@@ -785,7 +978,7 @@ export default function ChatPage() {
           </div>
       )}
 
-        {/* Footer - Transparent Background */}
+        {/* Footer - Transparent Background - REMAINS flex-shrink: 0 */}
         <footer className="p-3 bg-transparent flex-shrink-0">
           <form onSubmit={handleSubmit} className="flex flex-col gap-0"> 
             {/* Main Input Container with very large border-radius for squircle-like appearance */}
@@ -864,13 +1057,11 @@ export default function ChatPage() {
                 {/* Textarea */} 
                 <textarea
                   ref={textareaRef}
-                  rows={textareaRows}
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
                   placeholder="Message SageMind..."
                   disabled={isLoading}
                   className="flex-grow bg-transparent focus:outline-none text-gray-900 text-base placeholder-gray-500 resize-none overflow-y-auto pr-2"
-                  style={{ maxHeight: 'calc(4 * 1.5rem)' }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
@@ -885,23 +1076,45 @@ export default function ChatPage() {
 
               {/* Bottom Bar: Dropdown & Buttons */}
               <div className="flex justify-between items-center pt-2">
-                {/* Model Dropdown with squircle styling */}
-                <div className="relative">
-                  <select 
-                    value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                    className="appearance-none bg-gray-200 border border-gray-300 text-gray-700 text-xs focus:ring-blue-500 focus:border-blue-500 block w-full py-1.5 pl-2 pr-7 hover:bg-gray-300 cursor-pointer"
-                    style={{ borderRadius: '12px' }}
-                    disabled={isLoading} 
+                {/* Custom Model Dropdown with squircle styling */}
+                <div className="relative" ref={modelDropdownRef}>
+                  <button
+                    onClick={handleModelDropdownToggle}
+                    disabled={isLoading}
+                    className="flex items-center justify-between bg-gray-200 border border-gray-300 text-gray-700 text-xs hover:bg-gray-300 transition-colors cursor-pointer py-1.5 pl-2 pr-1.5"
+                    style={{ borderRadius: '12px', width: '140px' }}
                     title="Select AI Model"
                   >
-                    <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
-                    <option value="sonar">Perplexity Sonar</option>
-                    <option value="sonar-pro">Perplexity Sonar Pro</option>
-                  </select>
-                  <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
-                    <svg className="fill-current h-3 w-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
-                  </div>
+                    <span className="truncate">{currentModelLabel}</span>
+                    <svg className={`ml-1 h-3 w-3 text-gray-500 transform transition-transform ${isModelDropdownOpen ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                    </svg>
+                  </button>
+                  
+                  {/* Dropdown Menu - Modified to open upward */}
+                  {isModelDropdownOpen && (
+                    <div 
+                      className="absolute left-0 bottom-full mb-1 w-full bg-gray-100 border border-gray-300 shadow-sm z-20 overflow-hidden"
+                      style={{ borderRadius: '12px' }}
+                    >
+                      <div className="max-h-56 overflow-y-auto py-1">
+                        {modelOptions.map((option) => (
+                          <button
+                            key={option.value}
+                            className={`w-full text-left px-3 py-2 text-xs text-gray-700 focus:outline-none hover:bg-gray-200 transition-colors ${selectedModel === option.value ? 'bg-gray-200 font-medium' : ''}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedModel(option.value);
+                              setIsModelDropdownOpen(false);
+                              setError(null);
+                            }}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 
                 {/* Right Side Buttons */}
@@ -910,11 +1123,11 @@ export default function ChatPage() {
                   <button
                     type="button" 
                     onClick={() => fileInputRef.current?.click()} 
-                    disabled={isLoading}
-                    className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 flex items-center justify-center bg-gray-100"
+                    disabled={isLoading || !modelCapabilities[selectedModel]?.hasAttachment}
+                    className={`p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 flex items-center justify-center bg-gray-100 ${(!modelCapabilities[selectedModel]?.hasAttachment && !isLoading) ? 'opacity-50 cursor-not-allowed' : ''}`}
                     style={{ borderRadius: '14px' }} // Squircle-like for button
                     aria-label="Attach file"
-                    title="Attach image or audio file"
+                    title={modelCapabilities[selectedModel]?.hasAttachment ? "Attach image or audio file" : "File attachment not supported for this model"}
                   >
                     <Paperclip className="w-5 h-5" strokeWidth={2} />
                   </button>
@@ -931,11 +1144,11 @@ export default function ChatPage() {
                   <button
                     type="button" 
                     onClick={toggleRecording}
-                    disabled={isLoading}
-                    className={`p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 flex items-center justify-center ${isRecording ? 'text-red-600 bg-red-100' : 'bg-gray-100'}`}
+                    disabled={isLoading || !modelCapabilities[selectedModel]?.hasMic}
+                    className={`p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 flex items-center justify-center ${isRecording ? 'text-red-600 bg-red-100' : 'bg-gray-100'} ${(!modelCapabilities[selectedModel]?.hasMic && !isLoading) ? 'opacity-50 cursor-not-allowed' : ''}`}
                     style={{ borderRadius: '14px' }} // Squircle-like for button
                     aria-label={isRecording ? "Stop recording" : "Start recording"}
-                    title={isRecording ? "Stop recording" : "Record audio"}
+                    title={modelCapabilities[selectedModel]?.hasMic ? (isRecording ? "Stop recording" : "Record audio") : "Microphone not supported for this model"}
                   >
                     {isRecording ? 
                       <Square className="w-5 h-5" strokeWidth={2} /> : 
@@ -947,8 +1160,8 @@ export default function ChatPage() {
                   <button
                     type="submit" 
                     disabled={isLoading || (!inputValue.trim() && !selectedFile && !uploadedFileInfo && !audioUrl)}
-                    className="p-2 bg-black text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-700 focus:ring-offset-2 focus:ring-offset-gray-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square"
-                    style={{ borderRadius: '16px' }} // Squircle-like for send button
+                    className="p-2 bg-transparent text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-700 focus:ring-offset-2 focus:ring-offset-gray-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square"
+                    style={{ borderRadius: '16px', backgroundColor: 'rgba(0,0,0,0.9)' }} // Made semi-transparent
                     title="Send message"
                   >
                     <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
@@ -964,6 +1177,259 @@ export default function ChatPage() {
           </div>
         </footer>
       </div>
+
+      {/* Add custom scrollbar styles */}
+      <style jsx global>{`
+        /* Ensure html and body take full height and prevent scroll for native-like feel */
+        html,
+        body,
+        body > div:first-child,
+        div#__next,
+        div#__next > div {
+          height: 100%;
+          /* For mobile, dvh unit is better if supported widely, fallback to vh */
+          /* height: 100dvh; */ 
+          overflow: hidden; /* Prevent body scroll */
+        }
+
+        /* Apply word wrapping globally within chat messages if needed */
+        .chat-container .flex > div > div { /* Targets the inner message content containers */
+          overflow-wrap: break-word;
+          word-break: break-word; /* More aggressive breaking if needed */
+        }
+
+        /* Search chip specific styling - LIGHT GREY FILL & BORDER */
+        .search-chip {
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          border: 1px solid #e5e7eb !important; /* gray-200, light grey border */
+          border-radius: 9999px !important; /* fully rounded */
+          padding: 0.25rem 0.5rem !important; /* Reduced padding */
+          font-size: 11px !important; /* Smaller font size */
+          color: #374151 !important; /* gray-700 text */
+          background-color: #f3f4f6 !important; /* gray-100, light grey fill */
+          text-decoration: none !important;
+          margin-right: 0.5rem !important;
+          margin-bottom: 0.5rem !important;
+          transition: all 0.2s !important;
+          box-shadow: none !important; /* No shadow */
+          position: relative !important;
+          height: auto !important; /* Auto height based on content */
+          vertical-align: middle !important;
+        }
+        
+        /* Hover state for search chips - LIGHT GREY FILL & BORDER */
+        .search-chip:hover {
+          background-color: #e5e7eb !important; /* gray-200, slightly darker fill on hover */
+          border-color: #d1d5db !important; /* gray-300 border on hover */
+          color: #1f2937 !important; /* gray-800 text on hover */
+        }
+        
+        /* Stronger selector for Google search links - LIGHT GREY FILL & BORDER */
+        .chat-container div a[href*="google.com/search"].search-chip,
+        .chat-container a[href*="google.com/search"].search-chip,
+        a[href*="google.com/search"].search-chip { 
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          border: 1px solid #e5e7eb !important; /* gray-200, light grey border */
+          border-radius: 9999px !important; /* fully rounded */
+          padding: 0.25rem 0.5rem !important; /* Reduced padding */
+          font-size: 11px !important; /* Smaller font size */
+          color: #374151 !important; /* gray-700 text */
+          background-color: #f3f4f6 !important; /* gray-100, light grey fill */
+          text-decoration: none !important;
+          margin-right: 0.5rem !important;
+          margin-bottom: 0.5rem !important;
+          transition: all 0.2s !important;
+          box-shadow: none !important; /* No shadow */
+          position: relative !important;
+          height: auto !important; /* Auto height based on content */
+          vertical-align: middle !important;
+        }
+
+        a[href*="google.com/search"].search-chip:hover { 
+            background-color: #e5e7eb !important; /* gray-200, slightly darker fill on hover */
+            border-color: #d1d5db !important; /* gray-300 border on hover */
+            color: #1f2937 !important; /* gray-800 text on hover */
+        }
+        
+        /* Carousel container - ensure transparency and no border */
+        .chat-container div.carousel,
+        div.carousel {
+          display: flex !important;
+          align-items: center !important; 
+          min-height: auto !important; /* Allow height to adjust to content */
+          background: transparent !important;
+          border: none !important; 
+          box-shadow: none !important;
+          margin: 0 !important;
+          padding: 4px 0 !important; /* Reduced padding from 8px */
+          overflow: visible !important;
+        }
+        
+        /* Main suggestions container and Perplexity wrapper - TRANSPARENT, NO BORDER */
+        .search-suggestions-container,
+        .search-suggestions-container > div, /* Targets direct div children, e.g., perplexity wrapper */
+        div[class*="search-suggestions"],
+        div[class*="mt-3"] {
+          background-color: transparent !important;
+          border: none !important; 
+          box-shadow: none !important;
+          /* flex-direction & margin-top are fine from before */
+        }
+        
+        /* Force transparency and light theme on Perplexity rendered content more aggressively */
+        .search-suggestions-container div[dangerouslySetInnerHTML] > div,
+        .search-suggestions-container div[class*="pplx"],
+        .search-suggestions-container div[style*="background"],
+        .search-suggestions-container div[class*="bg-"] /* Target any div with a bg- class from perplexity */ {
+            background: transparent !important;
+            background-color: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+        }
+
+        .search-suggestions-container div[dangerouslySetInnerHTML] *,
+        .search-suggestions-container div[class*="pplx"] * {
+            color: #374151 !important; /* Default text to gray-700 for perplexity content */
+            background-color: transparent !important; 
+        }
+
+        .search-suggestions-container div[dangerouslySetInnerHTML] a,
+        .search-suggestions-container div[class*="pplx"] a {
+            color: #2563eb !important; /* Blue-600 for links in perplexity content */
+            text-decoration: underline !important; /* Add underline to perplexity links for clarity */
+        }
+
+        /* Remove the dark gradient at left of search chips (should still be effective) */
+        div[class*="carousel"]::before,
+        .carousel::before,
+        div[class*="search-suggestion"]::before,
+        .search-suggestions-container::before,
+        .carousel div.gradient, 
+        .search-suggestions-container div.gradient {
+          display: none !important;
+          /* ... other hiding properties ... */
+        }
+        
+        /* Google logo styling within search chips - consistent with Image 1 */
+        .search-chip img[src*="google"] { 
+          width: 16px !important; /* Slightly smaller to match smaller chip height */
+          height: 16px !important;
+          border-radius: 50% !important;
+          background-color: #ffffff !important; 
+          /* padding: 1px !important; */ /* Remove padding if logo is small */
+          margin-right: 5px !important; /* Adjust margin */
+          box-shadow: none !important; 
+          display: inline-block !important;
+          vertical-align: middle !important;
+        }
+        
+        /* Flex container for search chips for alignment */
+        .search-suggestions-container > div.flex.flex-wrap,
+        div.flex.flex-wrap[role="list"] {
+          /* display, flex-wrap, align-items, justify-content, gap, background, width, padding are fine */
+           min-height: auto !important; /* Let this container also adjust height */
+        }
+        
+        /* Overall search result containers - ensure transparency and no border */
+        .chat-container div[class*="search"],
+        div[class*="search"],
+        div[class*="suggestion"],
+        .search-suggestions-container {
+          background-color: transparent !important;
+          border: none !important;
+          box-shadow: none !important;
+        }
+        
+        /* Ensure this specific rule for search-chip a applies correctly */
+        .search-suggestions-container a.search-chip {
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          border: 1px solid #e5e7eb !important; /* gray-200, light grey border */
+          border-radius: 9999px !important; /* fully rounded */
+          padding: 0.25rem 0.5rem !important; /* Reduced padding */
+          font-size: 11px !important; /* Smaller font size */
+          color: #374151 !important; /* gray-700 text */
+          background-color: #f3f4f6 !important; /* gray-100, light grey fill */
+          text-decoration: none !important;
+          margin-right: 0.5rem !important;
+          margin-bottom: 0.5rem !important;
+          transition: all 0.2s !important;
+          box-shadow: none !important; /* No shadow */
+          position: relative !important;
+          height: auto !important; /* Auto height based on content */
+          vertical-align: middle !important;
+        }
+        
+        /* Modern scrollbar styles */
+        .chat-container {
+          scrollbar-width: thin; /* Firefox */
+          scrollbar-color: rgba(0,0,0,0) transparent; /* Firefox - hidden by default */
+        }
+        
+        /* Make scrollbar visible in Firefox when needed */
+        .chat-container.scrollbar-visible {
+          scrollbar-color: rgba(0,0,0,0.3) transparent !important; /* Slightly more visible */
+        }
+        
+        /* Base scrollbar styling (Chrome, Edge, Safari) */
+        .chat-container::-webkit-scrollbar {
+          width: 6px;
+          background-color: transparent;
+        }
+        
+        /* Completely remove scrollbar buttons/arrows */
+        .chat-container::-webkit-scrollbar-button {
+          display: none !important;
+          height: 0 !important;
+          width: 0 !important;
+          background-color: transparent !important;
+        }
+        
+        /* Hide scrollbar corner */
+        .chat-container::-webkit-scrollbar-corner {
+          display: none !important;
+          height: 0 !important;
+          width: 0 !important;
+          background-color: transparent !important;
+        }
+        
+        /* Scrollbar thumb styling (Chrome, Edge, Safari) - using opacity and visibility */
+        .chat-container::-webkit-scrollbar-thumb {
+          background-color: rgba(0,0,0,0.3) !important; /* Base color, slightly more visible */
+          border-radius: 3px !important;
+          opacity: 0 !important; /* Hidden by default */
+          visibility: hidden !important; /* Hidden by default */
+          transition: opacity 1.5s ease-in-out, visibility 1.5s ease-in-out !important; /* Slow fade-out */
+        }
+        
+        /* Show scrollbar when class is applied */
+        .chat-container.scrollbar-visible::-webkit-scrollbar-thumb {
+          opacity: 1 !important; /* Visible */
+          visibility: visible !important; /* Visible */
+          transition: opacity 0.5s ease-in-out, visibility 0.5s ease-in-out !important; /* Faster fade-in */
+        }
+        
+        /* Scrollbar track */
+        .chat-container::-webkit-scrollbar-track {
+          background-color: transparent !important;
+        }
+        
+        /* Scrollbar track piece */
+        .chat-container::-webkit-scrollbar-track-piece {
+          background-color: transparent !important;
+        }
+        
+        /* Scrollbar thumb hover */
+        .chat-container.scrollbar-visible::-webkit-scrollbar-thumb:hover {
+          background-color: rgba(0,0,0,0.5) !important; /* Darker on hover */
+        }
+        
+      `}</style>
 
       {/* Image Overlay Modal */}
       {isImageOverlayOpen && overlayImageUrl && (

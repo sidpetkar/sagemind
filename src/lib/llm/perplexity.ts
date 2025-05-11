@@ -38,7 +38,7 @@ export class PerplexityService implements LlmService {
     fileData?: FileData, 
     fileUri?: FileUri,
     modelName: string = DEFAULT_MODEL_NAME 
-  ): Promise<AsyncIterable<{ text?: string; webSearchQueries?: string[]; renderedContent?: string }>> {
+  ): Promise<AsyncIterable<{ text?: string; webSearchQueries?: string[]; renderedContent?: string; sourceCitations?: string[] }>> {
     // Get the selected model configuration
     const selectedModelConfig = MODELS[modelName as keyof typeof MODELS] || MODELS[DEFAULT_MODEL_NAME];
     
@@ -139,6 +139,7 @@ export class PerplexityService implements LlmService {
           let done = false;
           let citations: string[] = [];
           let completionId: string | null = null;
+          let buffer = ''; // Buffer for incomplete chunks
 
           while (!done) {
             const { value, done: isDone } = await reader.read();
@@ -149,10 +150,16 @@ export class PerplexityService implements LlmService {
             // Decode the chunk
             const chunk = decoder.decode(value, { stream: true });
             
-            // Process each line (event) in the chunk
-            const lines = chunk.split('\n').filter(line => line.trim() !== '');
+            // Add to buffer and process each complete line
+            buffer += chunk;
+            const lines = buffer.split('\n');
+            // Keep the last line in the buffer if it's incomplete (no newline)
+            buffer = lines.pop() || '';
             
+            // Process each complete line (event) in the buffer
             for (const line of lines) {
+              if (line.trim() === '') continue;
+              
               // SSE format: lines starting with "data: "
               if (line.startsWith('data: ')) {
                 const data = line.substring(6);
@@ -167,8 +174,17 @@ export class PerplexityService implements LlmService {
                   const content = parsed.choices?.[0]?.delta?.content || '';
                   
                   if (content) {
-                    accumulatedText += content;
-                    yield { text: content };
+                    // Check if this is the first chunk of content and it starts with whitespace
+                    // This helps ensure we don't lose leading text in the first chunk
+                    if (accumulatedText === '' && content.trim() !== '' && content !== content.trimStart()) {
+                      // If first chunk starts with whitespace but has content, trim leading whitespace
+                      const trimmedContent = content.trimStart();
+                      accumulatedText += trimmedContent;
+                      yield { text: trimmedContent };
+                    } else {
+                      accumulatedText += content;
+                      yield { text: content };
+                    }
                   }
                   
                   // Capture the completion ID for later use to get citations
@@ -219,12 +235,46 @@ export class PerplexityService implements LlmService {
                 
                 // Only show sources UI if we have citations
                 if (citations.length > 0) {
+                  // Send the citation URLs as part of the response payload
+                  yield { 
+                    sourceCitations: citations 
+                  };
+                  
                   const formattedSources = formatSourcesDisplay(citations);
                   
                   // The label will vary based on whether the response has citation markers
                   const sourcesLabel = hasCitationReferences ? 
                     "View Sources" : 
                     `Sources (${citations.length})`;
+                  
+                  // Before yielding sources, let's transform the numbered citations in the text to clickable links
+                  if (hasCitationReferences) {
+                    // One last chunk to update the citation numbers to hyperlinks
+                    // This replaces [1], [2], etc. with clickable links to the corresponding sources
+                    let updatedText = accumulatedText;
+                    const citationRegex = /\[(\d+)\]/g;
+                    let match;
+                    
+                    // Replace each [n] with a markdown link [n](url) if we have that citation index
+                    while ((match = citationRegex.exec(accumulatedText)) !== null) {
+                      const index = parseInt(match[1], 10) - 1; // Convert to 0-based index
+                      if (index >= 0 && index < citations.length) {
+                        const sourceUrl = citations[index];
+                        // Create a markdown link
+                        const replacement = `[${match[1]}](${sourceUrl})`;
+                        // Use regex to replace only this specific occurrence
+                        updatedText = updatedText.replace(match[0], replacement);
+                      }
+                    }
+                    
+                    // If we made changes, yield the updated text as a replacement
+                    if (updatedText !== accumulatedText) {
+                      yield { text: "\n\n" }; // Add some space
+                      yield { text: "---\n" }; // Add a separator
+                      yield { text: "**Citations converted to clickable links. Click any citation number to visit the source directly.**\n\n" };
+                      yield { text: updatedText };
+                    }
+                  }
                   
                   yield { 
                     webSearchQueries: [sourcesLabel],

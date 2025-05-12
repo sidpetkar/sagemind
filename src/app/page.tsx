@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown';
 // Import next/image
 import Image from 'next/image'; 
 // Import Lucide React icons
-import { Paperclip, Mic, Square, X, Send, ArrowUp } from 'lucide-react';
+import { Paperclip, Mic, Square, X, Send, ArrowUp, History, Plus, Trash2, LogIn, LogOut, PlusCircle, MessageCirclePlus } from 'lucide-react';
 // Import markdown extensions
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -15,6 +15,31 @@ import 'highlight.js/styles/github.css'; // Import a syntax highlighting theme
 
 // Import SuperEllipseImg
 import { SuperEllipseImg } from "react-superellipse";
+
+// Firebase imports
+import { db, auth } from '../lib/firebase'; // Import the db instance and auth
+import {
+  doc,
+  setDoc,
+  getDoc,
+  addDoc,
+  collection,
+  serverTimestamp,
+  query,
+  orderBy,
+  onSnapshot, // For realtime history updates later
+  deleteDoc,
+  Timestamp, // For type annotation
+  where
+} from 'firebase/firestore';
+import {
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut
+} from 'firebase/auth';
+
+// Import AuthContext
+import { useAuth } from '../contexts/AuthContext';
 
 interface Message {
   role: 'user' | 'ai';
@@ -27,6 +52,14 @@ interface Message {
   webSearchQueries?: string[]; // For Google Search grounded queries
   renderedContent?: string; // For Google Search rendered suggestions
   sourceCitations?: string[]; // Array of source URLs for citations
+}
+
+interface ChatThread {
+  id: string;
+  title: string;
+  messages: Message[];
+  createdAt: Timestamp | null; // Firestore Timestamp
+  updatedAt: Timestamp | null; // Firestore Timestamp
 }
 
 // Helper function to process text and make citation markers clickable
@@ -65,6 +98,8 @@ const processCitationMarkers = (text: string, citations?: string[]): React.React
 };
 
 export default function ChatPage() {
+  const { currentUser, authLoading } = useAuth(); // Use the auth context
+
   const [inputValue, setInputValue] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -108,6 +143,353 @@ export default function ChatPage() {
 
   // State for managing auto-scroll behavior
   const [isAutoScrollingPaused, setIsAutoScrollingPaused] = useState<boolean>(false);
+
+  // --- Guest Mode State ---
+  const [isGuestMode, setIsGuestMode] = useState<boolean>(false);
+
+  // --- Chat History State ---
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState<boolean>(false);
+  const [chatHistory, setChatHistory] = useState<ChatThread[]>([]);
+  // To prevent saving an empty new chat immediately on load
+  const hasLoadedInitialChat = useRef(false); 
+
+  // Helper function to generate a title for a chat
+  const generateChatTitle = (currentMessages: Message[]): string => {
+    if (!currentMessages || currentMessages.length === 0) {
+      return 'New Chat';
+    }
+    const firstUserMessage = currentMessages.find(msg => msg.role === 'user' && msg.content.trim() !== '');
+    if (firstUserMessage) {
+      return `${firstUserMessage.content.trim().split(' ').slice(0, 5).join(' ')}...`;
+    }
+    const firstAIMessage = currentMessages.find(msg => msg.role === 'ai' && msg.content.trim() !== '');
+     if (firstAIMessage) {
+      return `${firstAIMessage.content.trim().split(' ').slice(0, 5).join(' ')}...`;
+    }
+    // Fallback for chats that might somehow have no text messages but aren't 'New Chat' yet
+    // Or if a title couldn't be generated from message content for some reason.
+    return `Chat started ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  };
+
+  // Helper function to format Firestore Timestamps for display
+  const formatChatTimestamp = (timestamp: Timestamp | null | undefined): string => {
+    if (!timestamp || !timestamp.seconds) {
+      return 'No date';
+    }
+    const date = new Date(timestamp.seconds * 1000);
+    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) +
+           ' ' +
+           date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  };
+
+  // --- Firestore Functions ---
+
+  // Function to ensure a chat ID exists, creating a new chat document if needed.
+  // Returns the chat ID, or null if creation fails.
+  const getOrCreateCurrentChatId = async (): Promise<string | null> => {
+    if (currentChatId) {
+      return currentChatId;
+    }
+    console.log("No currentChatId. Attempting to create new chat document...");
+    setIsLoading(true); 
+    try {
+      const initialTitle = inputValue.trim() ? `${inputValue.trim().split(' ').slice(0, 5).join(' ')}...` : 'New Chat';
+      const newChatData: any = {
+        title: initialTitle, 
+        messages: [], 
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      if (currentUser) {
+        newChatData.userId = currentUser.uid; // Add userId if user is logged in
+      }
+      const newChatRef = await addDoc(collection(db, 'chatThreads'), newChatData);
+      setCurrentChatId(newChatRef.id);
+      localStorage.setItem('currentChatId', newChatRef.id);
+      console.log("New chat document created via getOrCreateCurrentChatId with ID:", newChatRef.id, "for user:", currentUser?.uid);
+      hasLoadedInitialChat.current = true;
+      setIsLoading(false);
+      return newChatRef.id;
+    } catch (err) {
+      console.error("Error creating new chat document:", err);
+      setError("Failed to initialize chat session. Please try again.");
+      setIsLoading(false);
+      return null;
+    }
+  };
+
+  const startNewChat = async () => {
+    console.log("Starting new local chat session...");
+    // No immediate Firestore write. Chat is created on first save.
+    setCurrentChatId(null);
+    setMessages([]);
+    setInputValue('');
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+    setSelectedFile(null);
+    setAudioUrl(null);
+    setUploadedFileInfo(null);
+    setError(null);
+    localStorage.removeItem('currentChatId'); // Clear any existing ID
+    hasLoadedInitialChat.current = true; // Ready for interaction
+    // setIsLoading(false); // Should not be needed as no async op here now
+  };
+
+  const loadChat = async (chatId: string) => {
+    console.log("Loading chat:", chatId);
+    if (!chatId || chatId === 'null') { // Handle explicit 'null' string from localstorage if it occurs
+      console.log("Invalid or null chatId provided to loadChat, starting new local chat.");
+      await startNewChat(); // This will set currentChatId to null locally
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const chatDocRef = doc(db, 'chatThreads', chatId);
+      const chatDocSnap = await getDoc(chatDocRef);
+
+      if (chatDocSnap.exists()) {
+        const chatData = chatDocSnap.data() as Omit<ChatThread, 'id'>; // Cast to ChatThread excluding id
+        setMessages(chatData.messages || []);
+        setCurrentChatId(chatId);
+        localStorage.setItem('currentChatId', chatId);
+        console.log("Chat loaded:", chatId, chatData);
+      } else {
+        console.warn(`Chat with ID ${chatId} not found. Starting a new chat.`);
+        localStorage.removeItem('currentChatId'); // Clear invalid ID
+        await startNewChat();
+      }
+      hasLoadedInitialChat.current = true; 
+    } catch (err) {
+      console.error("Error loading chat:", err);
+      setError(`Failed to load chat: ${err instanceof Error ? err.message : String(err)}`);
+      localStorage.removeItem('currentChatId');
+      await startNewChat(); // Fallback to new chat on error
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const saveCurrentChat = async (updatedMessages?: Message[]) => {
+    const messagesToSave = updatedMessages || messages;
+    let tempChatId = currentChatId;
+    if (!tempChatId) {
+      if (messagesToSave.length === 0) {
+        console.log("saveCurrentChat: Skipping save for new chat with no messages.");
+        return; 
+      }
+      console.warn("saveCurrentChat: currentChatId is null but messages exist. Attempting to create document (via getOrCreate).");
+      // This call will also handle setting currentChatId state and localStorage
+      tempChatId = await getOrCreateCurrentChatId(); 
+      if (!tempChatId) { // If creation failed in getOrCreate
+        console.error("saveCurrentChat: Failed to create/get chat ID.");
+        return;
+      }
+      // No need to re-create with addDoc here, getOrCreateCurrentChatId handles it.
+    }
+
+    if (!hasLoadedInitialChat.current) {
+      console.log("Initial chat not yet fully loaded/started, skipping save.");
+      return;
+    }
+    // This specific check for 'New Chat' title might be less relevant now with deferred creation,
+    // as an empty new chat won't even have an ID to save against until first message.
+    // However, keeping it as a safeguard for any edge cases where an ID exists but messages are empty.
+    if (messagesToSave.length === 0 && generateChatTitle(messagesToSave) === 'New Chat' && tempChatId) {
+        const docSnap = await getDoc(doc(db, 'chatThreads', tempChatId));
+        if (docSnap.exists() && docSnap.data().messages?.length === 0) {
+            console.log("Skipping save for an existing empty new chat in Firestore.");
+            return;
+        }
+    }
+
+    // Clean messages: Firestore doesn't allow undefined values.
+    const cleanedMessages = messagesToSave.map(msg => {
+      const cleanedMsg: Message = { role: msg.role, content: msg.content };
+      if (msg.audioUrl !== undefined) cleanedMsg.audioUrl = msg.audioUrl;
+      if (msg.fileType !== undefined) cleanedMsg.fileType = msg.fileType;
+      if (msg.fileName !== undefined) cleanedMsg.fileName = msg.fileName;
+      if (msg.imageBase64Preview !== undefined) cleanedMsg.imageBase64Preview = msg.imageBase64Preview;
+      if (msg.imageUrl !== undefined) cleanedMsg.imageUrl = msg.imageUrl;
+      if (msg.webSearchQueries !== undefined) cleanedMsg.webSearchQueries = msg.webSearchQueries;
+      if (msg.renderedContent !== undefined) cleanedMsg.renderedContent = msg.renderedContent;
+      if (msg.sourceCitations !== undefined) cleanedMsg.sourceCitations = msg.sourceCitations;
+      // Remove any keys that still have undefined values, or convert to null if preferred
+      // For simplicity, if a key was optional and undefined, it just won't be added to cleanedMsg
+      // if it wasn't explicitly checked above.
+      // A more robust way would be to iterate Object.keys(msg) and assign if value !== undefined.
+      return Object.fromEntries(Object.entries(cleanedMsg).filter(([_, v]) => v !== undefined)) as Message;
+    });
+
+    console.log("Saving chat:", tempChatId, "with messages:", cleanedMessages.length);
+    try {
+      const chatDocRef = doc(db, 'chatThreads', tempChatId); // Use tempChatId here
+      const newTitle = generateChatTitle(cleanedMessages);
+      
+      await setDoc(chatDocRef, {
+        title: newTitle,
+        messages: cleanedMessages, // Save the cleaned messages
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+      console.log("Chat saved successfully:", tempChatId);
+    } catch (err) {
+      console.error("Error saving chat:", err);
+    }
+  };
+
+  // --- End Firestore Functions ---
+
+   // --- Chat History Functions ---
+  const fetchChatHistory = () => {
+    // TODO: Filter by currentUser.uid if currentUser is available
+    let threadsQuery;
+    if (currentUser) {
+      console.log("Fetching history for user:", currentUser.uid);
+      threadsQuery = query(
+        collection(db, 'chatThreads'), 
+        where("userId", "==", currentUser.uid), 
+        orderBy('updatedAt', 'desc')
+      );
+    } else {
+      console.log("No user, fetching no history or guest history (if implemented).");
+      // For now, if no user, don't fetch any history or clear existing history.
+      // Or, you could fetch chats with no userId field (guest chats), if you want to support that.
+      setChatHistory([]); // Clear history if no user
+      return () => {}; // Return an empty unsubscribe function
+    }
+
+    const unsubscribe = onSnapshot(threadsQuery, (querySnapshot) => {
+      const history: ChatThread[] = [];
+      querySnapshot.forEach((doc) => {
+        history.push({ id: doc.id, ...doc.data() } as ChatThread);
+      });
+      setChatHistory(history);
+      console.log("Chat history updated:", history.length, "threads");
+    }, (error) => {
+      console.error("Error fetching chat history:", error);
+      setError("Could not load chat history.");
+    });
+    return unsubscribe; // Return the unsubscribe function for cleanup
+  };
+
+  const handleDeleteChat = async (chatIdToDelete: string) => {
+    console.log("Deleting chat immediately:", chatIdToDelete);
+    try {
+      await deleteDoc(doc(db, 'chatThreads', chatIdToDelete));
+      console.log("Chat deleted successfully from Firestore:", chatIdToDelete);
+      if (currentChatId === chatIdToDelete) {
+        await startNewChat(); // Start a new chat if the active one was deleted
+      }
+      // The onSnapshot listener in fetchChatHistory will update the UI.
+    } catch (err) {
+      console.error("Error deleting chat from Firestore:", err);
+      setError("Failed to delete chat. Please try again.");
+    }
+  };
+
+  const handleLoadChatFromHistory = async (chatIdToLoad: string) => {
+    if (currentChatId === chatIdToLoad) {
+      setIsHistoryModalOpen(false); // Already loaded, just close modal
+      return;
+    }
+    // Save current chat before switching, if it has content
+    if (messages.length > 0 && currentChatId && hasLoadedInitialChat.current) {
+      await saveCurrentChat(); 
+    }
+    await loadChat(chatIdToLoad);
+    setIsHistoryModalOpen(false);
+  };
+
+  // --- End Chat History Functions ---
+
+  // --- Auth Functions ---
+  const handleSignInWithGoogle = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+      // Auth state change will be handled by AuthProvider, no need to setUser here
+      console.log("Google sign-in successful");
+      // Potentially load user-specific chats or preferences here
+    } catch (error) {
+      console.error("Error during Google sign-in:", error);
+      setError("Failed to sign in with Google. Please try again.");
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      console.log("User signed out");
+      // Clear user-specific data
+      setCurrentChatId(null); 
+      localStorage.removeItem('currentChatId');
+      setMessages([]);
+      setChatHistory([]); // Clear loaded history as well
+      setIsGuestMode(false); // Exit guest mode on sign out
+      // UI should update based on currentUser becoming null
+    } catch (error) {
+      console.error("Error signing out:", error);
+      setError("Failed to sign out. Please try again.");
+    }
+  };
+
+  const handleSkipLogin = () => {
+    // For now, this function doesn't do much.
+    // It could be used to set a "guest" mode or similar.
+    console.log("Skip login pressed, entering guest mode.");
+    setIsGuestMode(true);
+    // If you want to allow proceeding to a limited version of the app:
+    // setCurrentUser(null); // Or some guest user object
+    // setAuthLoading(false); 
+    // However, the current structure heavily relies on currentUser for chat functionality.
+    // So, skipping might mean no chat functionality or a different UI path.
+  };
+  // --- End Auth Functions ---
+
+  // Effect for initial chat loading or starting a new one
+  useEffect(() => {
+    const initializeChat = async () => {
+      // Wait for auth to settle before deciding on chat
+      if (authLoading) return;
+
+      if (currentUser) {
+        setIsGuestMode(false); // If user is logged in, ensure guest mode is off
+      }
+
+      const savedChatId = localStorage.getItem('currentChatId');
+      // TODO: Later, tie chat history to currentUser.uid
+      if (savedChatId && savedChatId !== 'null') { 
+        await loadChat(savedChatId);
+      } else {
+        setCurrentChatId(null);
+        setMessages([]);
+        hasLoadedInitialChat.current = true; 
+        console.log("Initialized with no saved chat ID, ready for new local chat.");
+      }
+    };
+    initializeChat();
+  }, [authLoading, currentUser]); // Re-run if auth state changes (e.g., user logs in/out)
+
+  // Auto-save when messages change (and currentChatId is set or messages exist for a new chat)
+  useEffect(() => {
+    // Ensure chat can be saved even if currentChatId is null (for the first message of a new chat)
+    if ((currentChatId || messages.length > 0) && hasLoadedInitialChat.current && !authLoading) {
+      const debounceSave = setTimeout(() => {
+        saveCurrentChat(messages);
+      }, 1500);
+      return () => clearTimeout(debounceSave);
+    }
+  }, [messages, currentChatId, authLoading]); 
+
+  // Effect for fetching chat history on mount and listening for updates
+  useEffect(() => {
+    if (authLoading) return; // Don't fetch history until auth is resolved
+    // TODO: Modify fetchChatHistory to be user-specific if currentUser exists
+
+    const unsubscribeFromHistory = fetchChatHistory(); // Pass currentUser.uid if needed later
+    return () => {
+      unsubscribeFromHistory();
+    };
+  }, [authLoading, currentUser]); 
 
   // Track mouse movement in chat container with more reliable implementation
   const handleMouseMove = () => {
@@ -507,11 +889,21 @@ export default function ChatPage() {
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     
-    // Continue with normal message handling
     if (!inputValue.trim() && !selectedFile && !audioUrl && !uploadedFileInfo) {
       setError('Please enter a message or select a file.');
       return;
     }
+
+    const activeChatId = await getOrCreateCurrentChatId();
+
+    if (!activeChatId) {
+      // Error would have been set by getOrCreateCurrentChatId
+      // setIsLoading(false) should also be handled there.
+      return;
+    }
+
+    // Now, activeChatId is guaranteed to be a valid Firestore document ID.
+    // The currentChatId state should also be updated if it was a new chat.
 
     const userMessageContent = inputValue.trim();
 
@@ -537,7 +929,11 @@ export default function ChatPage() {
       }),
     };
 
-    setMessages((prevMessages) => [...prevMessages, newUserMessage]);
+    setMessages((prevMessages) => {
+      const updatedMessages = [...prevMessages, newUserMessage];
+      // saveCurrentChat(updatedMessages); // Moved to useEffect for debouncing
+      return updatedMessages;
+    });
     setInputValue('');
     
     // --- Auto-scroll logic on new user message --- 
@@ -570,7 +966,11 @@ export default function ChatPage() {
 
     // Add a placeholder for the AI response
     const aiMessagePlaceholder: Message = { role: 'ai', content: '' };
-    setMessages((prevMessages) => [...prevMessages, aiMessagePlaceholder]);
+    setMessages((prevMessages) => {
+      const updatedMessages = [...prevMessages, aiMessagePlaceholder];
+      // saveCurrentChat(updatedMessages); // Moved to useEffect for debouncing
+      return updatedMessages;
+    });
     const aiMessageIndex = messages.length + 1;
 
     try {
@@ -825,6 +1225,37 @@ export default function ChatPage() {
     }
   };
 
+  const handleHeaderNewChat = async () => {
+    if (messages.length > 0 && currentChatId && hasLoadedInitialChat.current) {
+      await saveCurrentChat(); // Save current work before starting new
+    }
+    await startNewChat();
+  };
+
+  const handleHeaderHistory = async () => {
+    // To be implemented: fetch chat history from Firestore
+    // For now, just toggles the modal for layout testing
+    console.log("History button clicked, toggling isHistoryModalOpen from:", isHistoryModalOpen);
+    setIsHistoryModalOpen(prev => !prev); 
+    // Fetching is now handled by the onSnapshot listener, so no need to fetch on open.
+  };
+
+  if (authLoading) {
+    return (
+      <div className="fixed inset-0 flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <svg className="mx-auto h-12 w-12 text-gray-400 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <p className="mt-2 text-sm text-gray-500">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // If currentUser exists or in guest mode, render the main chat application
+  // The login sheet will be rendered as an overlay if needed.
   return (
     // Outermost div for full-width background - MODIFIED FOR NATIVE-LIKE VIEWPORT HANDLING
     <div className="w-full bg-gray-50 fixed inset-0 flex flex-col">
@@ -832,9 +1263,73 @@ export default function ChatPage() {
       <div className="max-w-3xl mx-auto flex flex-col h-full w-full">
         {/* Header - Solid Background, No Border - REMAINS flex-shrink: 0 implicitly */}
         <header 
-          className="bg-gray-50 pt-3 pb-3 sm:pt-4 sm:pb-4 text-center z-10 flex-shrink-0"
+          className="bg-gray-50 pt-3 pb-3 sm:pt-4 sm:pb-4 text-center z-10 flex-shrink-0 flex items-center justify-between px-4"
         >
-          <h1 className="text-lg sm:text-xl font-semibold text-gray-800">SageMind</h1>
+          {/* Left side of header: Conditional based on auth state */} 
+          {authLoading ? (
+            <div className="w-1/3">{/* Placeholder for balance */}</div>
+          ) : currentUser ? ( // Show New Chat ONLY for logged-in users
+             <div className="w-1/3 flex justify-start">
+                <button 
+                  onClick={handleHeaderNewChat}
+                  className="p-2 rounded-full hover:bg-gray-200 transition-colors" 
+                  title="New Chat"
+                  aria-label="New Chat"
+                >
+                  <MessageCirclePlus 
+                    className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700" 
+                    style={{ transform: 'scaleX(-1)' }} // Flipped horizontally
+                  /> 
+                </button>
+             </div>
+          ) : (
+            <div className="w-1/3">{/* Placeholder if login sheet is up */}</div>
+          )}
+
+          {/* Center of header: Title */} 
+          <div className="flex-grow text-center">
+            {/* Always show SageMind title once auth is done loading */}
+            <h1 className="text-lg sm:text-xl font-semibold text-gray-800">SageMind</h1>
+          </div>
+
+          {/* Right side of header: Auth/User actions */} 
+          <div className="w-1/3 flex justify-end items-center gap-1 sm:gap-2">
+            {authLoading ? (
+              <div className="h-8">{/* Placeholder to maintain height */}</div>
+            ) : currentUser ? (
+              <>
+                <button 
+                  onClick={handleHeaderHistory}
+                  className="p-2 rounded-full hover:bg-gray-200 transition-colors"
+                  title="Chat History"
+                  aria-label="Chat History"
+                >
+                  <History className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700" />
+                </button>
+                <button 
+                  onClick={handleSignOut}
+                  className="p-2 rounded-full hover:bg-gray-200 transition-colors"
+                  title={`Sign Out (${currentUser.displayName || currentUser.email})`}
+                  aria-label="Sign Out"
+                >
+                  <LogOut className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700" />
+                </button>
+              </>
+            ) : isGuestMode ? (
+              // Show Log In button for guests - clicking this should show the login drawer
+              <button 
+                onClick={() => setIsGuestMode(false)} // This will reveal the login bottom sheet
+                className="p-2 rounded-full hover:bg-gray-200 transition-colors"
+                title="Sign In"
+                aria-label="Sign In"
+              >
+                <LogIn className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700" />
+              </button>
+            ) : (
+              // Placeholder if login sheet is up (user is not logged in and not guest)
+              <div className="h-8"></div>
+            )}
+          </div>
         </header>
 
         {/* Main content - Relative positioning for overlay - MODIFIED FOR NATIVE-LIKE VIEWPORT HANDLING */}
@@ -1272,7 +1767,7 @@ export default function ChatPage() {
                   <button
                     type="submit" 
                     disabled={isLoading || (!inputValue.trim() && !selectedFile && !uploadedFileInfo && !audioUrl)}
-                    className="p-2 bg-transparent text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-700 focus:ring-offset-2 focus:ring-offset-gray-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square"
+                    className="p-2 bg-transparent text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-700 focus:ring-offset-2 focus:ring-offset-gray-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square cursor-pointer"
                     style={{ borderRadius: '16px', backgroundColor: 'rgba(0,0,0,0.9)' }} // Made semi-transparent
                     title="Send message"
                   >
@@ -1290,278 +1785,92 @@ export default function ChatPage() {
         </footer>
       </div>
 
-      {/* Add custom scrollbar styles */}
-      <style jsx global>{`
-        /* Ensure html and body take full height and prevent scroll for native-like feel */
-        html,
-        body,
-        body > div:first-child,
-        div#__next,
-        div#__next > div {
-          height: 100%;
-          /* For mobile, dvh unit is better if supported widely, fallback to vh */
-          /* height: 100dvh; */ 
-          overflow: hidden; /* Prevent body scroll */
-        }
+      {/* Login Bottom Sheet Overlay - Rendered on top of the main app if needed */}
+      {!currentUser && !isGuestMode && (
+        // Outermost container for backdrop blur and bottom alignment
+        // On md screens and up, justify-center to vertically center the sheet
+        <div className="fixed inset-0 bg-[rgba(0,0,0,0.4)] backdrop-blur-sm z-40 flex flex-col justify-end md:justify-center items-center">
+          {/* Bottom Sheet Drawer */}
+          {/* On md screens and up, use rounded-3xl for all-around corners */}
+          <div className="bg-gray-50 w-full max-w-md p-6 sm:p-8 rounded-t-3xl md:rounded-3xl shadow-[0_-6px_20px_rgba(0,0,0,0.08)]">
+            <div className="text-center space-y-5 sm:space-y-6">
+              <div>
+                <h1 className="text-3xl sm:text-4xl font-bold text-gray-800">SageMind</h1>
+                <p className="mt-2 text-sm sm:text-md text-gray-600">Where Wisdom Meets Wild Ideas</p>
+              </div>
+              
+              <button
+                onClick={handleSignInWithGoogle}
+                className="w-full flex items-center justify-center bg-white text-gray-700 font-medium py-3 px-4 border border-gray-300 rounded-full shadow-sm hover:bg-gray-100 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 text-base sm:text-lg"
+              >
+                <Image src="/g-logo.png" alt="Google logo" width={24} height={24} className="mr-3" />
+                Continue with Google
+              </button>
+              
+              <button
+                onClick={handleSkipLogin}
+                className="w-full text-gray-600 hover:text-gray-800 underline text-sm py-2 transition-colors"
+              >
+                Skip
+              </button>
 
-        /* Apply word wrapping globally within chat messages if needed */
-        .chat-container .flex > div > div { /* Targets the inner message content containers */
-          overflow-wrap: break-word;
-          word-break: break-word; /* More aggressive breaking if needed */
-        }
+              <div className="pt-2 text-center text-xs text-gray-500">
+                  Experiment by <a href="https://x.com/siddhantpetkar" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-700">@sidpetkar</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
-        /* Search chip specific styling - LIGHT GREY FILL & BORDER */
-        .search-chip {
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          border: 1px solid #e5e7eb !important; /* gray-200, light grey border */
-          border-radius: 9999px !important; /* fully rounded */
-          padding: 0.25rem 0.5rem !important; /* Reduced padding */
-          font-size: 11px !important; /* Smaller font size */
-          color: #374151 !important; /* gray-700 text */
-          background-color: #f3f4f6 !important; /* gray-100, light grey fill */
-          text-decoration: none !important;
-          margin-right: 0.5rem !important;
-          margin-bottom: 0.5rem !important;
-          transition: all 0.2s !important;
-          box-shadow: none !important; /* No shadow */
-          position: relative !important;
-          height: auto !important; /* Auto height based on content */
-          vertical-align: middle !important;
-        }
-        
-        /* Hover state for search chips - LIGHT GREY FILL & BORDER */
-        .search-chip:hover {
-          background-color: #e5e7eb !important; /* gray-200, slightly darker fill on hover */
-          border-color: #d1d5db !important; /* gray-300 border on hover */
-          color: #1f2937 !important; /* gray-800 text on hover */
-        }
-        
-        /* Stronger selector for Google search links - LIGHT GREY FILL & BORDER */
-        .chat-container div a[href*="google.com/search"].search-chip,
-        .chat-container a[href*="google.com/search"].search-chip,
-        a[href*="google.com/search"].search-chip { 
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          border: 1px solid #e5e7eb !important; /* gray-200, light grey border */
-          border-radius: 9999px !important; /* fully rounded */
-          padding: 0.25rem 0.5rem !important; /* Reduced padding */
-          font-size: 11px !important; /* Smaller font size */
-          color: #374151 !important; /* gray-700 text */
-          background-color: #f3f4f6 !important; /* gray-100, light grey fill */
-          text-decoration: none !important;
-          margin-right: 0.5rem !important;
-          margin-bottom: 0.5rem !important;
-          transition: all 0.2s !important;
-          box-shadow: none !important; /* No shadow */
-          position: relative !important;
-          height: auto !important; /* Auto height based on content */
-          vertical-align: middle !important;
-        }
-
-        a[href*="google.com/search"].search-chip:hover { 
-            background-color: #e5e7eb !important; /* gray-200, slightly darker fill on hover */
-            border-color: #d1d5db !important; /* gray-300 border on hover */
-            color: #1f2937 !important; /* gray-800 text on hover */
-        }
-        
-        /* Carousel container - ensure transparency and no border */
-        .chat-container div.carousel,
-        div.carousel {
-          display: flex !important;
-          align-items: center !important; 
-          min-height: auto !important; /* Allow height to adjust to content */
-          background: transparent !important;
-          border: none !important; 
-          box-shadow: none !important;
-          margin: 0 !important;
-          padding: 4px 0 !important; /* Reduced padding from 8px */
-          overflow: visible !important;
-        }
-        
-        /* Main suggestions container and Perplexity wrapper - TRANSPARENT, NO BORDER */
-        .search-suggestions-container,
-        .search-suggestions-container > div, /* Targets direct div children, e.g., perplexity wrapper */
-        div[class*="search-suggestions"],
-        div[class*="mt-3"] {
-          background-color: transparent !important;
-          border: none !important; 
-          box-shadow: none !important;
-          /* flex-direction & margin-top are fine from before */
-        }
-        
-        /* Force transparency and light theme on Perplexity rendered content more aggressively */
-        .search-suggestions-container div[dangerouslySetInnerHTML] > div,
-        .search-suggestions-container div[class*="pplx"],
-        .search-suggestions-container div[style*="background"],
-        .search-suggestions-container div[class*="bg-"] /* Target any div with a bg- class from perplexity */ {
-            background: transparent !important;
-            background-color: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
-        }
-
-        .search-suggestions-container div[dangerouslySetInnerHTML] *,
-        .search-suggestions-container div[class*="pplx"] * {
-            color: #374151 !important; /* Default text to gray-700 for perplexity content */
-            background-color: transparent !important; 
-        }
-
-        .search-suggestions-container div[dangerouslySetInnerHTML] a,
-        .search-suggestions-container div[class*="pplx"] a {
-            color: #2563eb !important; /* Blue-600 for links in perplexity content */
-            text-decoration: underline !important; /* Add underline to perplexity links for clarity */
-        }
-
-        /* Remove the dark gradient at left of search chips (should still be effective) */
-        div[class*="carousel"]::before,
-        .carousel::before,
-        div[class*="search-suggestion"]::before,
-        .search-suggestions-container::before,
-        .carousel div.gradient, 
-        .search-suggestions-container div.gradient {
-          display: none !important;
-          /* ... other hiding properties ... */
-        }
-        
-        /* Google logo styling within search chips - consistent with Image 1 */
-        .search-chip img[src*="google"] { 
-          width: 16px !important; /* Slightly smaller to match smaller chip height */
-          height: 16px !important;
-          border-radius: 50% !important;
-          background-color: #ffffff !important; 
-          /* padding: 1px !important; */ /* Remove padding if logo is small */
-          margin-right: 5px !important; /* Adjust margin */
-          box-shadow: none !important; 
-          display: inline-block !important;
-          vertical-align: middle !important;
-        }
-        
-        /* Flex container for search chips for alignment */
-        .search-suggestions-container > div.flex.flex-wrap,
-        div.flex.flex-wrap[role="list"] {
-          /* display, flex-wrap, align-items, justify-content, gap, background, width, padding are fine */
-           min-height: auto !important; /* Let this container also adjust height */
-        }
-        
-        /* Overall search result containers - ensure transparency and no border */
-        .chat-container div[class*="search"],
-        div[class*="search"],
-        div[class*="suggestion"],
-        .search-suggestions-container {
-          background-color: transparent !important;
-          border: none !important;
-          box-shadow: none !important;
-        }
-        
-        /* Ensure this specific rule for search-chip a applies correctly */
-        .search-suggestions-container a.search-chip {
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          border: 1px solid #e5e7eb !important; /* gray-200, light grey border */
-          border-radius: 9999px !important; /* fully rounded */
-          padding: 0.25rem 0.5rem !important; /* Reduced padding */
-          font-size: 11px !important; /* Smaller font size */
-          color: #374151 !important; /* gray-700 text */
-          background-color: #f3f4f6 !important; /* gray-100, light grey fill */
-          text-decoration: none !important;
-          margin-right: 0.5rem !important;
-          margin-bottom: 0.5rem !important;
-          transition: all 0.2s !important;
-          box-shadow: none !important; /* No shadow */
-          position: relative !important;
-          height: auto !important; /* Auto height based on content */
-          vertical-align: middle !important;
-        }
-        
-        /* Modern scrollbar styles */
-        .chat-container {
-          scrollbar-width: thin; /* Firefox */
-          scrollbar-color: rgba(0,0,0,0) transparent; /* Firefox - hidden by default */
-        }
-        
-        /* Make scrollbar visible in Firefox when needed */
-        .chat-container.scrollbar-visible {
-          scrollbar-color: rgba(0,0,0,0.3) transparent !important; /* Slightly more visible */
-        }
-        
-        /* Base scrollbar styling (Chrome, Edge, Safari) */
-        .chat-container::-webkit-scrollbar {
-          width: 6px;
-          background-color: transparent;
-        }
-        
-        /* Completely remove scrollbar buttons/arrows */
-        .chat-container::-webkit-scrollbar-button {
-          display: none !important;
-          height: 0 !important;
-          width: 0 !important;
-          background-color: transparent !important;
-        }
-        
-        /* Hide scrollbar corner */
-        .chat-container::-webkit-scrollbar-corner {
-          display: none !important;
-          height: 0 !important;
-          width: 0 !important;
-          background-color: transparent !important;
-        }
-        
-        /* Scrollbar thumb styling (Chrome, Edge, Safari) - using opacity and visibility */
-        .chat-container::-webkit-scrollbar-thumb {
-          background-color: rgba(0,0,0,0.3) !important; /* Base color, slightly more visible */
-          border-radius: 3px !important;
-          opacity: 0 !important; /* Hidden by default */
-          visibility: hidden !important; /* Hidden by default */
-          transition: opacity 1.5s ease-in-out, visibility 1.5s ease-in-out !important; /* Slow fade-out */
-        }
-        
-        /* Show scrollbar when class is applied */
-        .chat-container.scrollbar-visible::-webkit-scrollbar-thumb {
-          opacity: 1 !important; /* Visible */
-          visibility: visible !important; /* Visible */
-          transition: opacity 0.5s ease-in-out, visibility 0.5s ease-in-out !important; /* Faster fade-in */
-        }
-        
-        /* Scrollbar track */
-        .chat-container::-webkit-scrollbar-track {
-          background-color: transparent !important;
-        }
-        
-        /* Scrollbar track piece */
-        .chat-container::-webkit-scrollbar-track-piece {
-          background-color: transparent !important;
-        }
-        
-        /* Scrollbar thumb hover */
-        .chat-container.scrollbar-visible::-webkit-scrollbar-thumb:hover {
-          background-color: rgba(0,0,0,0.5) !important; /* Darker on hover */
-        }
-        
-      `}</style>
-
-      {/* Image Overlay Modal */}
-      {isImageOverlayOpen && overlayImageUrl && (
-        <div
-          className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4 cursor-pointer"
-          onClick={handleCloseImageOverlay} // Close on clicking background
+      {/* History Modal */}
+      {isHistoryModalOpen && (
+        <div 
+          className="fixed inset-0 bg-[rgba(0,0,0,0.4)] backdrop-blur-sm z-45 flex items-center justify-center p-4" // Reverted to original bg, kept z-45
+          onClick={() => {
+            setIsHistoryModalOpen(false);
+          }}
         >
-          <div
-            className="relative bg-transparent max-w-[90vw] max-h-[90vh] overflow-auto cursor-default"
-            onClick={(e) => e.stopPropagation()} // Prevent click on image/modal from closing it
+          <div 
+            className="bg-white shadow-xl p-4 sm:p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto flex flex-col"
+            style={{ borderRadius: '28px' }}
+            onClick={(e) => e.stopPropagation()} 
           >
-            <button
-              onClick={handleCloseImageOverlay}
-              className="absolute top-2 right-2 text-gray-500 hover:text-gray-800 bg-white bg-opacity-70 hover:bg-opacity-100 rounded-full p-1.5 z-10 leading-none"
-              aria-label="Close image overlay"
-              title="Close image"
-            >
-              <X className="w-5 h-5 sm:w-6 sm:w-6" />
-            </button>
-            <img src={overlayImageUrl} alt="Full size preview" className="block max-w-full max-h-[85vh] object-contain" />
+            <div className="flex justify-between items-center mb-4 flex-shrink-0">
+              <h2 className="text-xl font-semibold text-gray-800 pl-2">History</h2>
+              <button onClick={() => setIsHistoryModalOpen(false)} className="text-gray-500 hover:text-gray-700">
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+            {chatHistory.length === 0 ? (
+              <p className="text-gray-600 text-center py-4">No chat history found.</p>
+            ) : (
+              <ul className="space-y-2">
+                {chatHistory.map((chatThread) => (
+                  <li 
+                    key={chatThread.id} 
+                    onClick={() => handleLoadChatFromHistory(chatThread.id)}
+                    className="p-3 bg-gray-50 hover:bg-gray-100 rounded-md cursor-pointer flex justify-between items-center group"
+                  >
+                    <div className="flex-grow min-w-0"> 
+                      <p className="font-medium text-gray-700 group-hover:text-blue-600 transition-colors truncate pr-2" title={chatThread.title || 'Untitled Chat'}>{chatThread.title || 'Untitled Chat'}</p>
+                      <p className="text-xs text-gray-500">
+                        {formatChatTimestamp(chatThread.updatedAt || chatThread.createdAt)} {/* CORRECTED THIS LINE */}
+                      </p>
+                    </div>
+                    <button 
+                      onClick={(e) => { 
+                        e.stopPropagation();
+                        handleDeleteChat(chatThread.id); 
+                      }}
+                      className="text-gray-400 hover:text-red-500 p-1.5 rounded-full hover:bg-red-100 transition-colors flex-shrink-0 ml-2"
+                      title="Delete chat"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       )}

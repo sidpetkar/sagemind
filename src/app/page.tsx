@@ -41,14 +41,20 @@ import {
 // Import AuthContext
 import { useAuth } from '../contexts/AuthContext';
 
+// Import image storage utilities
+import { storeImageToFirebase, getImageFromStorage } from '../lib/imageStorage';
+
 interface Message {
   role: 'user' | 'ai';
   content: string;
   audioUrl?: string; // Optional URL for audio playback
   fileType?: string; // Optional file type info
   fileName?: string; // Optional file name
-  imageBase64Preview?: string; // For image previews in user messages
-  imageUrl?: string; // For AI-generated images
+  imageBase64Preview?: string; // For image previews in user messages (temporary, not for storage)
+  imagePreviewStoragePath?: string; // Storage path for user images
+  imageBase64?: string; // For AI-generated base64 images (FLUX) (temporary, not for storage)
+  imageStoragePath?: string; // Storage path for AI-generated images
+  imageUrl?: string; // For AI-generated images or image URLs
   webSearchQueries?: string[]; // For Google Search grounded queries
   renderedContent?: string; // For Google Search rendered suggestions
   sourceCitations?: string[]; // Array of source URLs for citations
@@ -195,19 +201,26 @@ export default function ChatPage() {
     setIsLoading(true); 
     try {
       const initialTitle = inputValue.trim() ? `${inputValue.trim().split(' ').slice(0, 5).join(' ')}...` : 'New Chat';
+      // Build the initial chat data
       const newChatData: any = {
         title: initialTitle, 
         messages: [], 
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
+      
+      // Add userId if user is logged in
       if (currentUser) {
-        newChatData.userId = currentUser.uid; // Add userId if user is logged in
+        console.log("Adding userId to new chat:", currentUser.uid);
+        newChatData.userId = currentUser.uid;
+      } else {
+        console.log("Creating chat in guest mode (no userId)");
       }
+      
       const newChatRef = await addDoc(collection(db, 'chatThreads'), newChatData);
       setCurrentChatId(newChatRef.id);
       localStorage.setItem('currentChatId', newChatRef.id);
-      console.log("New chat document created via getOrCreateCurrentChatId with ID:", newChatRef.id, "for user:", currentUser?.uid);
+      console.log("New chat document created with ID:", newChatRef.id, "for user:", currentUser?.uid || 'guest');
       hasLoadedInitialChat.current = true;
       setIsLoading(false);
       return newChatRef.id;
@@ -249,10 +262,84 @@ export default function ChatPage() {
 
       if (chatDocSnap.exists()) {
         const chatData = chatDocSnap.data() as Omit<ChatThread, 'id'>; // Cast to ChatThread excluding id
-        setMessages(chatData.messages || []);
+        
+        // Process messages to load images from storage paths when available
+        const processedMessages = await Promise.all(chatData.messages?.map(async (msg) => {
+          // Create a copy of the message
+          const processedMsg = { ...msg };
+          
+          try {
+            // If we have an image storage path for AI-generated images, load it
+            if (processedMsg.imageStoragePath) {
+              console.log(`Loading AI-generated image from storage: ${processedMsg.imageStoragePath}`);
+              const imageUrl = await getImageFromStorage(processedMsg.imageStoragePath);
+              // Fetch successful - load the image data
+              const response = await fetch(imageUrl);
+              const blob = await response.blob();
+              
+              // Convert blob to base64
+              const reader = new FileReader();
+              const base64Promise = new Promise<string>((resolve) => {
+                reader.onloadend = () => {
+                  const base64data = reader.result as string;
+                  resolve(base64data);
+                };
+              });
+              reader.readAsDataURL(blob);
+              
+              // Wait for base64 conversion and set the data
+              const base64data = await base64Promise;
+              // Extract only the base64 part without the data URL prefix
+              const base64String = base64data.split(',')[1];
+              
+              // Add the image data back to the message
+              processedMsg.imageBase64 = base64String;
+            }
+            
+            // If we have an image preview storage path for user uploads, load it
+            if (processedMsg.imagePreviewStoragePath) {
+              console.log(`Loading user image from storage: ${processedMsg.imagePreviewStoragePath}`);
+              const imageUrl = await getImageFromStorage(processedMsg.imagePreviewStoragePath);
+              // Fetch successful - load the image data
+              const response = await fetch(imageUrl);
+              const blob = await response.blob();
+              
+              // Convert blob to base64
+              const reader = new FileReader();
+              const base64Promise = new Promise<string>((resolve) => {
+                reader.onloadend = () => {
+                  const base64data = reader.result as string;
+                  resolve(base64data);
+                };
+              });
+              reader.readAsDataURL(blob);
+              
+              // Wait for base64 conversion and set the data
+              const base64data = await base64Promise;
+              // Extract only the base64 part without the data URL prefix
+              const base64String = base64data.split(',')[1];
+              
+              // Add the image data back to the message
+              processedMsg.imageBase64Preview = base64String;
+            }
+          } catch (loadError) {
+            console.error("Error loading image from storage:", loadError);
+            // If loading fails, add a note to the message
+            if (processedMsg.imageStoragePath) {
+              processedMsg.content += "\n\n[Failed to load AI-generated image. Please try refreshing.]";
+            }
+            if (processedMsg.imagePreviewStoragePath) {
+              processedMsg.content += "\n\n[Failed to load attached image. Please try refreshing.]";
+            }
+          }
+          
+          return processedMsg;
+        }) || []);
+        
+        setMessages(processedMessages);
         setCurrentChatId(chatId);
         localStorage.setItem('currentChatId', chatId);
-        console.log("Chat loaded:", chatId, chatData);
+        console.log("Chat loaded:", chatId, "with", processedMessages.length, "messages");
       } else {
         console.warn(`Chat with ID ${chatId} not found. Starting a new chat.`);
         localStorage.removeItem('currentChatId'); // Clear invalid ID
@@ -291,6 +378,7 @@ export default function ChatPage() {
       console.log("Initial chat not yet fully loaded/started, skipping save.");
       return;
     }
+    
     // This specific check for 'New Chat' title might be less relevant now with deferred creation,
     // as an empty new chat won't even have an ID to save against until first message.
     // However, keeping it as a safeguard for any edge cases where an ID exists but messages are empty.
@@ -302,37 +390,63 @@ export default function ChatPage() {
         }
     }
 
-    // Clean messages: Firestore doesn't allow undefined values.
+    // Directly store simplified message objects with optimized image data
     const cleanedMessages = messagesToSave.map(msg => {
-      const cleanedMsg: Message = { role: msg.role, content: msg.content };
-      if (msg.audioUrl !== undefined) cleanedMsg.audioUrl = msg.audioUrl;
-      if (msg.fileType !== undefined) cleanedMsg.fileType = msg.fileType;
-      if (msg.fileName !== undefined) cleanedMsg.fileName = msg.fileName;
-      if (msg.imageBase64Preview !== undefined) cleanedMsg.imageBase64Preview = msg.imageBase64Preview;
-      if (msg.imageUrl !== undefined) cleanedMsg.imageUrl = msg.imageUrl;
-      if (msg.webSearchQueries !== undefined) cleanedMsg.webSearchQueries = msg.webSearchQueries;
-      if (msg.renderedContent !== undefined) cleanedMsg.renderedContent = msg.renderedContent;
-      if (msg.sourceCitations !== undefined) cleanedMsg.sourceCitations = msg.sourceCitations;
-      // Remove any keys that still have undefined values, or convert to null if preferred
-      // For simplicity, if a key was optional and undefined, it just won't be added to cleanedMsg
-      // if it wasn't explicitly checked above.
-      // A more robust way would be to iterate Object.keys(msg) and assign if value !== undefined.
-      return Object.fromEntries(Object.entries(cleanedMsg).filter(([_, v]) => v !== undefined)) as Message;
+      // Create a basic message with essential content
+      const cleanedMsg: any = { 
+        role: msg.role, 
+        content: msg.content 
+      };
+      
+      // Copy most fields directly
+      if (msg.audioUrl) cleanedMsg.audioUrl = msg.audioUrl;
+      if (msg.fileType) cleanedMsg.fileType = msg.fileType;
+      if (msg.fileName) cleanedMsg.fileName = msg.fileName;
+      if (msg.webSearchQueries) cleanedMsg.webSearchQueries = msg.webSearchQueries;
+      if (msg.renderedContent) cleanedMsg.renderedContent = msg.renderedContent;
+      if (msg.sourceCitations) cleanedMsg.sourceCitations = msg.sourceCitations;
+      if (msg.imageUrl) cleanedMsg.imageUrl = msg.imageUrl;
+      
+      // Directly store image data but compressed if needed
+      // For AI-generated images (FLUX)
+      if (msg.imageBase64) {
+        cleanedMsg.imageBase64 = msg.imageBase64;
+      }
+      
+      // For user uploaded image previews
+      if (msg.imageBase64Preview) {
+        cleanedMsg.imageBase64Preview = msg.imageBase64Preview;
+      }
+      
+      return cleanedMsg;
     });
 
     console.log("Saving chat:", tempChatId, "with messages:", cleanedMessages.length);
     try {
-      const chatDocRef = doc(db, 'chatThreads', tempChatId); // Use tempChatId here
+      const chatDocRef = doc(db, 'chatThreads', tempChatId);
       const newTitle = generateChatTitle(cleanedMessages);
       
-      await setDoc(chatDocRef, {
-        title: newTitle,
-        messages: cleanedMessages, // Save the cleaned messages
-        updatedAt: serverTimestamp(),
-      }, { merge: true });
+      // Add userId property to link chats to users
+      if (currentUser) {
+        await setDoc(chatDocRef, {
+          title: newTitle,
+          messages: cleanedMessages,
+          updatedAt: serverTimestamp(),
+          userId: currentUser.uid
+        }, { merge: true });
+      } else {
+        // For guest mode, don't include userId
+        await setDoc(chatDocRef, {
+          title: newTitle,
+          messages: cleanedMessages,
+          updatedAt: serverTimestamp(),
+        }, { merge: true });
+      }
+      
       console.log("Chat saved successfully:", tempChatId);
     } catch (err) {
       console.error("Error saving chat:", err);
+      setError("Failed to save chat. Some content might not be preserved.");
     }
   };
 
@@ -555,6 +669,7 @@ export default function ChatPage() {
   const modelOptions = [
     { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
     { value: 'meta-llama/Llama-Vision-Free', label: 'Llama Vision' },
+    { value: 'black-forest-labs/FLUX.1-schnell-Free', label: 'FLUX.1 [schnell]' },
     { value: 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free', label: 'Llama 3.3 Instruct' },
     { value: 'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free', label: 'DeepSeek R1' },
     { value: 'sonar', label: 'Perplexity Sonar' },
@@ -817,6 +932,19 @@ export default function ChatPage() {
     setIsImageOverlayOpen(false);
     setOverlayImageUrl(null);
   };
+  
+  const handleDownloadImage = () => {
+    if (overlayImageUrl) {
+      const link = document.createElement('a');
+      link.href = overlayImageUrl;
+      // Generate a filename with timestamp
+      const fileName = `sagemind-image-${Date.now()}.jpg`;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  };
   // --- End Image Overlay Handlers ---
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
@@ -910,7 +1038,23 @@ export default function ChatPage() {
     setIsLoading(true);
     setError(null);
 
-    const historyToSend = messages;
+    // Configure history to include images for vision models
+    const historyToSend = messages.map(msg => {
+      // For non-AI messages that include images and we're using a vision model
+      const isVisionModel = selectedModel === 'gemini-2.0-flash' || selectedModel === 'meta-llama/Llama-Vision-Free';
+      
+      if (msg.role === 'user' && msg.imageBase64Preview && isVisionModel) {
+        return {
+          ...msg,
+          // Keep imageBase64Preview in history for vision models
+        };
+      }
+      // For all other messages, just send the standard content
+      return {
+        role: msg.role,
+        content: msg.content
+      };
+    });
 
     // Add user message to state (including file info if present)
     const newUserMessage: Message = {
@@ -1011,6 +1155,32 @@ export default function ChatPage() {
       if (!response.ok) {
         const errorData = await response.json(); // Assuming error response is JSON
         throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+      }
+
+      // Check if the selected model is FLUX image generation model
+      if (selectedModel === 'black-forest-labs/FLUX.1-schnell-Free') {
+        // For FLUX, the response is not streamed - it's a direct JSON response
+        const payload = await response.json();
+        
+        if (payload.error) {
+          throw new Error(payload.error.message || payload.error);
+        }
+        
+        // Update the AI message with the generated image
+        setMessages((prevMessages) => {
+          const updatedMessages = [...prevMessages];
+          if (updatedMessages[aiMessageIndex]) {
+            updatedMessages[aiMessageIndex] = {
+              role: 'ai',
+              content: payload.text || `Image generated for: "${userMessageContent}"`,
+              imageBase64: payload.imageBase64
+            };
+          }
+          return updatedMessages;
+        });
+        
+        setIsLoading(false);
+        return; // Early return since we've handled the response
       }
 
       // --- Handle Streaming Response --- 
@@ -1128,6 +1298,7 @@ export default function ChatPage() {
   const modelCapabilities: Record<string, { hasAttachment?: boolean; hasMic?: boolean }> = {
     'gemini-2.0-flash': { hasAttachment: true, hasMic: true },
     'meta-llama/Llama-Vision-Free': { hasAttachment: true, hasMic: false },
+    'black-forest-labs/FLUX.1-schnell-Free': { hasAttachment: false, hasMic: false },
     'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free': { hasAttachment: false, hasMic: false },
     'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free': { hasAttachment: false, hasMic: false },
     'sonar': { hasAttachment: false, hasMic: false },
@@ -1226,10 +1397,32 @@ export default function ChatPage() {
   };
 
   const handleHeaderNewChat = async () => {
-    if (messages.length > 0 && currentChatId && hasLoadedInitialChat.current) {
-      await saveCurrentChat(); // Save current work before starting new
+    // Set loading state
+    setIsLoading(true);
+    
+    try {
+      // Only save current chat if it has content and a valid ID
+      if (messages.length > 0 && currentChatId && hasLoadedInitialChat.current) {
+        await saveCurrentChat(); // Save current work before starting new
+      }
+      
+      // Then start new chat - this should be a fast local operation
+      setCurrentChatId(null);
+      setMessages([]);
+      setInputValue('');
+      if (textareaRef.current) textareaRef.current.style.height = 'auto';
+      setSelectedFile(null);
+      setAudioUrl(null);
+      setUploadedFileInfo(null);
+      setError(null);
+      localStorage.removeItem('currentChatId'); // Clear any existing ID
+      hasLoadedInitialChat.current = true; // Ready for interaction
+    } catch (err) {
+      console.error("Error during new chat creation:", err);
+      setError("Failed to start new chat. Please try again.");
+    } finally {
+      setIsLoading(false);
     }
-    await startNewChat();
   };
 
   const handleHeaderHistory = async () => {
@@ -1492,7 +1685,18 @@ export default function ChatPage() {
                         </div>
                       )}
                       
-                      {msg.imageUrl && (
+                      {msg.imageBase64 && (
+                        <div className="mt-2">
+                          <img
+                            src={`data:image/jpeg;base64,${msg.imageBase64}`}
+                            alt="Generated by AI"
+                            className="max-w-full md:max-w-md h-auto rounded-2xl cursor-pointer hover:opacity-80 transition-opacity"
+                            onClick={() => handleOpenImageOverlay(`data:image/jpeg;base64,${msg.imageBase64}`)}
+                          />
+                        </div>
+                      )}
+                      
+                      {msg.imageUrl && !msg.imageBase64 && (
                         <div className="mt-2">
                           <img
                             src={msg.imageUrl}
@@ -1701,7 +1905,7 @@ export default function ChatPage() {
                   {/* Dropdown Menu - Modified to open upward */}
                   {isModelDropdownOpen && (
                     <div 
-                      className="absolute left-0 bottom-full mb-1 w-full bg-gray-100 border border-gray-300 shadow-sm z-20 overflow-hidden"
+                      className="absolute left-0 bottom-full mb-1 w-full bg-gray-100 border border-gray-300 shadow-sm z-20 overflow-hidden model-dropdown visible"
                       style={{ borderRadius: '12px' }}
                     >
                       <div className="max-h-56 overflow-y-auto py-1">
@@ -1831,7 +2035,7 @@ export default function ChatPage() {
           }}
         >
           <div 
-            className="bg-white shadow-xl p-4 sm:p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto flex flex-col"
+            className="bg-white shadow-xl p-4 sm:p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto flex flex-col history-modal"
             style={{ borderRadius: '28px' }}
             onClick={(e) => e.stopPropagation()} 
           >
@@ -1844,7 +2048,7 @@ export default function ChatPage() {
             {chatHistory.length === 0 ? (
               <p className="text-gray-600 text-center py-4">No chat history found.</p>
             ) : (
-              <ul className="space-y-2">
+              <ul className="space-y-2 history-chat-list">
                 {chatHistory.map((chatThread) => (
                   <li 
                     key={chatThread.id} 
@@ -1854,7 +2058,7 @@ export default function ChatPage() {
                     <div className="flex-grow min-w-0"> 
                       <p className="font-medium text-gray-700 group-hover:text-blue-600 transition-colors truncate pr-2" title={chatThread.title || 'Untitled Chat'}>{chatThread.title || 'Untitled Chat'}</p>
                       <p className="text-xs text-gray-500">
-                        {formatChatTimestamp(chatThread.updatedAt || chatThread.createdAt)} {/* CORRECTED THIS LINE */}
+                        {formatChatTimestamp(chatThread.updatedAt || chatThread.createdAt)}
                       </p>
                     </div>
                     <button 
@@ -1871,6 +2075,52 @@ export default function ChatPage() {
                 ))}
               </ul>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Image Overlay - Centered with Blur Backdrop */} 
+      {isImageOverlayOpen && overlayImageUrl && (
+        <div 
+          className="fixed inset-0 bg-[rgba(0,0,0,0.5)] backdrop-blur-md z-50 flex items-center justify-center p-4 transition-opacity duration-300 ease-in-out"
+          onClick={handleCloseImageOverlay} // Close on backdrop click
+        >
+          {/* Modal content area: container for the image and buttons */}
+          <div 
+            className="relative rounded-2xl shadow-xl bg-transparent overflow-hidden" // Simplified: no flex, image will dictate size up to max constraints
+            onClick={(e) => e.stopPropagation()} // Prevent closing when clicking on the image/modal content itself
+          >
+            <img 
+              src={overlayImageUrl} 
+              alt="Preview" 
+              className="block object-contain max-w-[calc(90vw-2rem)] max-h-[calc(90vh-2rem)] rounded-2xl" // Image controls its size, rounded to match parent, adjusted max size for padding of overlay
+            />
+            {/* Buttons container: top-right of the modal content area */}
+            <div className="absolute top-2 right-2 flex gap-2 sm:top-3 sm:right-3 z-10">
+              <button
+                onClick={handleDownloadImage}
+                className="aspect-square w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center p-2 bg-[rgba(0,0,0,0.6)] text-white rounded-full hover:bg-[rgba(0,0,0,0.8)] transition-colors"
+                title="Download image"
+                aria-label="Download image"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+              </button>
+              <button 
+                onClick={handleCloseImageOverlay}
+                className="aspect-square w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center p-2 bg-[rgba(0,0,0,0.6)] text-white rounded-full hover:bg-[rgba(0,0,0,0.8)] transition-colors"
+                title="Close preview"
+                aria-label="Close preview"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       )}

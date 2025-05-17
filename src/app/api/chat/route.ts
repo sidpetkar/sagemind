@@ -10,6 +10,7 @@ interface PayloadChunk {
   webSearchQueries?: string[];
   renderedContent?: string;
   sourceCitations?: string[]; // Added for clickable citation links
+  imageBase64?: string; // Added for FLUX image generation
   // We can add other fields for different model capabilities
 }
 
@@ -51,11 +52,37 @@ async function handleLlamaVisionRequest(
     throw new Error("TOGETHER_API_KEY is not set. Llama Vision model is not available.");
   }
 
-  const messages: any[] = history.map(h => ({
-    role: h.role === 'model' ? 'assistant' : h.role, // Together uses 'assistant' for model
-    content: h.content
-  }));
+  // Process history to ensure it includes image data
+  // First, create base message structures
+  const messages: any[] = [];
+  
+  // Process each message in history, properly converting format for Together AI
+  history.forEach(h => {
+    // Skip empty messages
+    if (!h.content?.trim()) return;
+    
+    // Add proper type checking
+    const role = h.role as string;
+    
+    if (role === 'model' || role === 'assistant') {
+      // AI messages are simple text
+      messages.push({
+        role: 'assistant',
+        content: h.content
+      });
+    } else if (role === 'user') {
+      // User messages might contain images
+      // For simplicity in this implementation, we'll just use text
+      // A more complete implementation would check for imageBase64Preview and include those
+      messages.push({
+        role: 'user',
+        content: h.content
+      });
+    }
+    // Ignore any messages with unsupported roles
+  });
 
+  // Current message with image handling
   const userMessageContent: any[] = [{ type: 'text', text: message }];
 
   if (fileData && fileData.mimeType.startsWith('image/')) {
@@ -63,6 +90,7 @@ async function handleLlamaVisionRequest(
       type: 'image_url',
       image_url: { url: `data:${fileData.mimeType};base64,${fileData.base64String}` }
     });
+    console.log("Adding image to Llama Vision request");
   } else if (fileData) {
     // If a non-image file is provided to Llama Vision, append a note or handle as error
     userMessageContent.push({ type: 'text', text: `\n\n(Note: A file named '${fileNameFromForm || 'file'}' of type '${fileData.mimeType}' was uploaded, but this model primarily processes images and text.)` });
@@ -73,12 +101,14 @@ async function handleLlamaVisionRequest(
     content: userMessageContent
   });
 
-  console.log("Sending to Together AI (Llama Vision):", JSON.stringify(messages, null, 2));
+  // Log the full message structure for debugging if needed
+  console.log("Sending to Together AI (Llama Vision) with message count:", messages.length);
 
   const stream = await together.chat.completions.create({
     model: "meta-llama/Llama-Vision-Free",
     messages: messages,
     stream: true,
+    max_tokens: 2048, // Add a reasonable token limit
   });
 
   const encoder = new TextEncoder();
@@ -160,6 +190,78 @@ async function handleTogetherAIChatRequest(
   });
 }
 
+// New handler for FLUX.1-schnell-Free image generation
+async function handleFluxImageRequest(
+  prompt: string
+): Promise<NextResponse> { // Returns NextResponse directly, not a stream
+  if (!process.env.TOGETHER_API_KEY) {
+    return NextResponse.json({ error: "TOGETHER_API_KEY is not set. Image generation model is not available." }, { status: 500 });
+  }
+  if (!prompt || prompt.trim() === "") {
+    return NextResponse.json({ error: "Prompt is required for image generation." }, { status: 400 });
+  }
+
+  console.log(`Sending to Together AI (FLUX.1-schnell-Free) with prompt: "${prompt}"`);
+
+  try {
+    // Type for the expected response structure from Together AI images.create
+    type TogetherImageResponse = {
+      data?: Array<{
+        b64_json?: string;
+      }>;
+    };
+
+    const response: TogetherImageResponse = await together.images.create({
+      model: "black-forest-labs/FLUX.1-schnell-Free",
+      prompt: prompt,
+      width: 1024,
+      height: 1024,
+      steps: 4, // FLUX.1-schnell-Free requires steps between 1 and 4
+      n: 1,
+      response_format: "base64",
+    });
+
+    console.log("Raw response from Together AI Images:", JSON.stringify(response, null, 2));
+
+    const imageBase64 = response?.data?.[0]?.b64_json;
+
+    if (imageBase64) {
+      const payload: PayloadChunk = { imageBase64: imageBase64, text: `Image generated for: "${prompt}"` };
+      return NextResponse.json(payload);
+    } else {
+      console.error("Error generating image with FLUX.1-schnell-Free: No b64_json data in response.", response);
+      let detailedError = "Image generation failed: No image data returned by the API.";
+      return NextResponse.json({ error: "Failed to generate image", details: detailedError, rawResponse: response }, { status: 500 });
+    }
+  } catch (error: any) {
+    console.error("Exception during Together AI image generation:", error);
+    let errorMessage = "Error generating image due to an exception.";
+    let errorDetails: any = { message: "An unexpected error occurred." };
+
+    if (error instanceof Error) {
+      errorMessage = error.message;
+      errorDetails = { name: error.name, message: error.message, stack: error.stack };
+    }
+    // Check if the error object is from Together AI or an HTTP error
+    if (error.response && error.response.data) {
+        errorDetails = error.response.data;
+        if (typeof error.response.data === 'string') {
+            errorMessage = error.response.data;
+        } else if (error.response.data.error && typeof error.response.data.error.message === 'string') {
+            errorMessage = error.response.data.error.message;
+        } else if (typeof error.response.data.detail === 'string') {
+            errorMessage = error.response.data.detail;
+        } else if (error.response.statusText) {
+            errorMessage = `API Error: ${error.response.status} - ${error.response.statusText}`;
+        }
+    } else if (error.message) {
+        errorMessage = error.message;
+    }
+
+    return NextResponse.json({ error: errorMessage, details: errorDetails }, { status: 500 });
+  }
+}
+
 export async function POST(request: Request) {
   try {
     // Read FormData instead of JSON
@@ -223,13 +325,19 @@ export async function POST(request: Request) {
     let fileData: FileData | undefined = undefined;
     let fileUri: FileUri | undefined = undefined;
 
-    // Handle pre-processed file data
+    // Handle pre-processed file data (this is the most reliable method)
     if (base64String && convertedMimeType) {
       console.log(`Using pre-processed file with type: ${convertedMimeType} and base64 length: ${base64String.length}`);
-      fileData = {
-        mimeType: convertedMimeType,
-        base64String: base64String
-      };
+      
+      // Add extra validation for Base64 data
+      if (base64String.length > 5) { // Minimal validation to avoid empty data
+        fileData = {
+          mimeType: convertedMimeType,
+          base64String: base64String
+        };
+      } else {
+        console.error("Invalid base64 data: string is too short");
+      }
     }
     // Handle uploaded file URI (keeping for future use when Files API is supported)
     else if (fileUriString && fileMimeType) {
@@ -243,21 +351,38 @@ export async function POST(request: Request) {
     // Direct file upload (convert to base64)
     else if (file) {
       try {
+        console.log(`Processing direct file upload: ${file.name}, size: ${file.size}, type: ${file.type}`);
+        
+        if (file.size === 0) {
+          throw new Error("Uploaded file is empty (0 bytes)");
+        }
+        
         const fileBuffer = await file.arrayBuffer();
+        if (fileBuffer.byteLength === 0) {
+          throw new Error("File buffer is empty after reading");
+        }
+        
         const base64String = Buffer.from(fileBuffer).toString('base64');
         console.log(`Converted direct file ${file.name} to base64 (length: ${base64String.length})`);
+        
+        if (base64String.length < 5) {
+          throw new Error("Generated base64 string is invalid or too short");
+        }
+        
         fileData = {
           mimeType: file.type,
           base64String: base64String
         };
       } catch (fileError) {
           console.error("Error processing file:", fileError);
-          return NextResponse.json({ error: 'Failed to process uploaded file' }, { status: 500 });
+          return NextResponse.json({ error: 'Failed to process uploaded file: ' + (fileError instanceof Error ? fileError.message : 'Unknown error') }, { status: 500 });
       }
     }
     
     if (!fileData && !fileUri) {
-      console.log("Warning: No file data or URI was processed successfully");
+      console.log("No file data or URI was processed successfully");
+    } else {
+      console.log("Successfully processed file data with mime type:", fileData?.mimeType || fileUri?.mimeType);
     }
 
     // --- Handle Llama Vision Model --- 
@@ -296,6 +421,16 @@ export async function POST(request: Request) {
       }
     }
     // --- End Handle Together AI Models ---
+
+    // --- Handle Image Generation Model ---
+    if (modelName === "black-forest-labs/FLUX.1-schnell-Free") {
+      if (!message) { // Prompt is in the 'message' field for image generation
+        return NextResponse.json({ error: 'Prompt (message) is required for image generation' }, { status: 400 });
+      }
+      // Directly call the image generation handler and return its response
+      return handleFluxImageRequest(message);
+    }
+    // --- End Handle Image Generation Model ---
 
     // Select the appropriate service based on model name for Gemini/Perplexity
     const selectedService = getServiceForModel(modelName || '');

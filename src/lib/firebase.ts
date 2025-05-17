@@ -1,6 +1,7 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
+import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import { getStorage } from 'firebase/storage';
 // import { getAnalytics, isSupported } from 'firebase/analytics'; // Optional: if you want analytics
 
 const firebaseConfig = {
@@ -14,19 +15,17 @@ const firebaseConfig = {
 };
 
 // Initialize Firebase
-let app;
-if (!getApps().length) {
-  app = initializeApp(firebaseConfig);
-} else {
-  app = getApp(); // If already initialized, use that one
-}
+const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 
 const db = getFirestore(app);
 const auth = getAuth(app);
+const storage = getStorage(app);
 // let analytics; // Optional: if you want analytics
 // if (typeof window !== 'undefined') { // Check if window is defined (i.e., running in browser)
 //   isSupported().then(yes => { if (yes) analytics = getAnalytics(app); });
 // }
 
-export { db, auth }; // Export Firestore and Auth instances
+export { db, auth, storage }; // Export Firestore, Auth, and Storage instances
 // export { db, analytics }; // If you enable analytics 
+
+export default app; 

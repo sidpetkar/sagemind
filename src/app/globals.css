@@ -1,28 +1,267 @@
 @import "tailwindcss";
 
+/* Base CSS Variables - not in any layer */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Light mode colors by default */
+  --bg-primary: #f9fafb;
+  --bg-surface: #ffffff;
+  --text-primary: #1f2937;
+  --text-secondary: #1f2937; /* Changed to match primary for simplified color scheme */
+  --border-color: #e5e7eb;
+  --bubble-user: #e5e7eb; /* Slightly darker bubble background for better contrast */
+  --bubble-ai: transparent;
+  --bubble-text-user: #1f2937; /* Changed to dark text for light bg */
+  --bubble-text-ai: #1f2937;
+  --input-bg: #f3f4f6;
+  --input-border: #e5e7eb;
+  --button-bg: #000000;
+  --button-bg-hover: #262626;
+  --button-text: #ffffff;
+  --button-text-hover: #ffffff;
+  --icon-color: #6b7280;
+  --hover-bg: #e5e7eb; /* Slightly darker for better hover visibility */
+  --hover-dark-bg: #1e1e1e;
+  --modal-bg: #ffffff;
+  --google-btn-text: #FFFFFF; /* White text for Google button in both modes */
+  --dropdown-bg: #f9fafb; /* Match main background color */
+  --dropdown-item-bg: #f9fafb; /* Match main background color for items */
+  --dropdown-selected-bg: #e5e7eb; /* Darker background for selected item */
+  --dropdown-hover: #e5e7eb; /* Updated dropdown hover for light mode */
+  --placeholder-color: #6b7280;
+  --fade-from: #f9fafb;
+  --fade-to: transparent;
+  --history-item-bg: #f9fafb;
+
+  color-scheme: light;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* Theme class overrides for dark mode - outside any layers */
+.dark, html.theme-dark {
+  --bg-primary: #161616;
+  --bg-surface: #161616;
+  --text-primary: #F9FAFB;
+  --text-secondary: #F9FAFB; /* Changed to match primary for simplified color scheme */
+  --border-color: #2F2F2E;
+  --bubble-user: #292929; /* Dark bubble for user in dark mode */
+  --bubble-ai: transparent;
+  --bubble-text-user: #F9FAFB;
+  --bubble-text-ai: #F9FAFB;
+  --input-bg: #1E1E1E;
+  --input-border: #2F2F2E;
+  --button-bg: #ffffff;
+  --button-bg-hover: #000000;
+  --button-text: #000000;
+  --button-text-hover: #ffffff;
+  --icon-color: #C8C8C8;
+  --hover-bg: #292929;
+  --hover-dark-bg: #1E1E1E;
+  --modal-bg: #1E1E1E;
+  --google-btn-text: #FFFFFF; /* White text for Google button in both modes */
+  --dropdown-bg: #161616; /* Match main background color */
+  --dropdown-item-bg: #161616; /* Match main background color for items */
+  --dropdown-selected-bg: #292929; /* Darker background for selected item */
+  --dropdown-hover: #1E1E1E;
+  --placeholder-color: #A6A6A6;
+  --fade-from: #161616;
+  --fade-to: transparent;
+  --history-item-bg: #292929;
+
+  color-scheme: dark;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Override Tailwind classes with our CSS variables */
+.bg-gray-50 {
+  background-color: var(--bg-primary) !important;
+}
+
+.bg-gray-100 {
+  background-color: var(--hover-bg) !important;
+}
+
+.dark\:bg-\[\#161616\] {
+  background-color: var(--bg-primary) !important;
+}
+
+.text-gray-800 {
+  color: var(--text-primary) !important; 
+}
+
+.dark\:text-\[\#F9FAFB\] {
+  color: var(--text-primary) !important;
+}
+
+/* Fix for user message bubbles */
+.bg-blue-600, div[class*="dark:bg-[#292929]"], .user-bubble {
+  background-color: var(--bubble-user) !important;
+}
+
+/* Ensure dark mode bubbles are correctly styled */
+html.dark .bg-blue-600, 
+html.dark div[class*="dark:bg-[#292929]"],
+html.dark .user-bubble,
+html.theme-dark .bg-blue-600,
+html.theme-dark div[class*="dark:bg-[#292929]"],
+html.theme-dark .user-bubble {
+  background-color: #292929 !important;
+}
+
+.dark\:border-\[\#2F2F2E\] {
+  border-color: var(--border-color) !important;
+}
+
+.dark\:border-transparent {
+  border-color: transparent !important;
+}
+
+.hover\:bg-gray-200:hover {
+  background-color: var(--hover-bg) !important;
+}
+
+.hover\:bg-gray-300:hover {
+  background-color: var(--hover-bg) !important;
+}
+
+.dark\:hover\:bg-\[\#292929\]:hover {
+  background-color: var(--hover-dark-bg) !important;
+}
+
+.dark\:hover\:bg-\[\#1E1E1E\]:hover {
+  background-color: var(--hover-dark-bg) !important;
+}
+
+.dark\:bg-\[\#1E1E1E\] {
+  background-color: var(--input-bg) !important;
+}
+
+.bg-neutral-800 {
+  background-color: var(--button-bg) !important;
+}
+
+/* Dark mode buttons */
+.dark\:bg-\[\#292929\].button {
+  background-color: var(--button-bg) !important;
+}
+
+.hover\:bg-neutral-900:hover, .dark\:hover\:bg-\[\#1E1E1E\]:hover {
+  background-color: var(--button-bg-hover) !important;
+}
+
+/* Fix the fade overlay */
+.from-gray-50 {
+  --tw-gradient-from: var(--fade-from) !important;
+}
+
+.dark\:from-\[\#161616\] {
+  --tw-gradient-from: var(--fade-from) !important;
+}
+
+/* Fix for the dropdown */
+.bg-gray-200.dark\:bg-\[\#292929\] {
+  background-color: var(--dropdown-bg) !important;
+  border: 1px solid #e0e0e0 !important; /* Light grey border for light mode */
+}
+
+html.dark .bg-gray-200.dark\:bg-\[\#292929\],
+html.theme-dark .bg-gray-200.dark\:bg-\[\#292929\] {
+  border-color: var(--border-color) !important; /* Use dark mode border color */
+}
+
+.hover\:bg-gray-300.dark\:hover\:bg-\[\#1E1E1E\] {
+  background-color: var(--dropdown-hover) !important;
+}
+
+/* Fix for the placeholder text */
+::placeholder {
+  color: var(--placeholder-color) !important;
+  opacity: 1;
+}
+
+::-webkit-input-placeholder {
+  color: var(--placeholder-color) !important;
+}
+
+:-ms-input-placeholder {
+  color: var(--placeholder-color) !important;
+}
+
+.placeholder-gray-500::placeholder {
+  color: var(--placeholder-color) !important;
+}
+
+.dark\:placeholder-\[\#A6A6A6\]::placeholder {
+  color: var(--placeholder-color) !important;
+}
+
+/* Additional overrides for text colors */
+.text-white, .dark .user-bubble, .theme-dark .user-bubble {
+  color: var(--bubble-text-user) !important;
+}
+
+.text-gray-700 {
+  color: var(--text-primary) !important;
+}
+
+.dark\:text-\[\#C8C8C8\] {
+  color: var(--icon-color) !important;
+}
+
+.dark\:text-\[\#A6A6A6\] {
+  color: var(--text-secondary) !important;
+}
+
+/* Additional overrides for the model dropdown */
+.bg-gray-200 {
+  background-color: var(--hover-bg) !important;
+}
+
+/* Fix for the history modal background */
+.history-modal {
+  background-color: var(--modal-bg) !important;
+}
+
+.bg-white {
+  background-color: var(--modal-bg) !important;
+}
+
+/* Fix for history items */
+.bg-gray-50.dark\:bg-\[\#292929\] {
+  background-color: var(--history-item-bg) !important;
+}
+
+/* Google button text color fix - make it white for both themes */
+.bg-white.text-gray-700 button span {
+  color: var(--google-btn-text) !important;
+}
+
+/* Fix for icon colors in history modal */
+.text-gray-400 {
+  color: var(--icon-color) !important;
+}
+
+.text-gray-500 {
+  color: var(--text-secondary) !important;
+}
+
+.hover\:text-red-500:hover {
+  color: #ef4444 !important; /* Keep red color for delete icons */
+}
+
+.dark\:hover\:text-red-400:hover {
+  color: #f87171 !important; /* Lighter red for dark mode */
+}
+
+.text-red-500 {
+  color: #ef4444 !important;
+}
+
+.dark\:text-red-400 {
+  color: #f87171 !important;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
 }
 
 /* Custom Scrollbar Styling */
@@ -83,4 +322,64 @@ body {
 .history-chat-list {
   max-height: calc(5 * 3.5rem); /* Height for 5 chat items */
   overflow-y: auto;
+}
+
+/* Button styling overrides */
+.send-button {
+  background-color: var(--button-bg) !important;
+  color: var(--button-text) !important;
+}
+
+.send-button:hover {
+  background-color: var(--button-bg-hover) !important;
+  color: var(--button-text-hover) !important;
+}
+
+/* Icon button hover states */
+.icon-button {
+  cursor: pointer;
+  border-radius: 9999px;
+  transition: background-color 0.2s ease;
+}
+
+.icon-button:hover {
+  background-color: rgba(230, 230, 230, 0.9) !important; /* Light mode hover background */
+}
+
+html.dark .icon-button:hover,
+html.theme-dark .icon-button:hover {
+  background-color: rgba(50, 50, 50, 0.9) !important; /* Dark mode hover background */
+}
+
+/* Dropdown styling fixes */
+/* Model dropdown button */
+button.model-dropdown-toggle {
+  background-color: var(--dropdown-bg) !important;
+  border-color: var(--border-color) !important;
+  color: var(--text-primary) !important;
+}
+
+button.model-dropdown-toggle:hover {
+  background-color: var(--dropdown-hover) !important;
+}
+
+/* Dropdown container */
+.model-dropdown {
+  background-color: var(--dropdown-bg) !important;
+  border-color: var(--border-color) !important;
+}
+
+/* Dropdown items */
+.model-dropdown-item {
+  background-color: var(--dropdown-item-bg) !important;
+  color: var(--text-primary) !important;
+}
+
+.model-dropdown-item:hover {
+  background-color: var(--dropdown-hover) !important;
+}
+
+.model-dropdown-item.selected {
+  background-color: var(--dropdown-selected-bg) !important;
+  font-weight: 500;
 }

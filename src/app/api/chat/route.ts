@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { GeminiService } from '@/lib/llm/gemini'; // Using path alias '@'
 import { PerplexityService } from '@/lib/llm/perplexity'; // Import the Perplexity service
+import { OpenRouterService } from '@/lib/llm/openrouter'; // Import the OpenRouter service
 import { ChatMessage, FileData, FileUri, LlmService } from '@/lib/llm/interface'; // Import LlmService
 import Together from 'together-ai'; // Added for Llama Vision
 
@@ -23,6 +24,7 @@ interface FrontendMessage {
 // Instantiate services
 const geminiService = new GeminiService();
 const perplexityService = new PerplexityService();
+const openRouterService = new OpenRouterService();
 // Explicitly set API key from environment variable
 const together = new Together({ 
   apiKey: process.env.TOGETHER_API_KEY 
@@ -33,10 +35,18 @@ if (!process.env.TOGETHER_API_KEY) {
   console.warn("TOGETHER_API_KEY is not set. Together AI models will not be available.");
 }
 
+// Check for OpenRouter API Key
+if (!process.env.OPENROUTER_API_KEY) {
+  console.warn("OPENROUTER_API_KEY is not set. OpenRouter models will not be available.");
+}
+
 // Helper function to select the appropriate service based on model name
 function getServiceForModel(modelName: string): LlmService {
   if (modelName.startsWith('sonar')) {
     return perplexityService;
+  }
+  if (modelName === 'qwen/qwen2.5-vl-72b-instruct:free' || modelName === 'microsoft/phi-4-reasoning-plus:free') {
+    return openRouterService;
   }
   return geminiService; // Default to Gemini
 }
@@ -297,8 +307,22 @@ export async function POST(request: Request) {
       modelName
     });
 
+    // Check if we're handling an audio file
+    const isAudioRequest = (
+      (convertedMimeType && convertedMimeType.startsWith('audio/')) ||
+      (file && file.type.startsWith('audio/')) ||
+      (fileMimeType && fileMimeType.startsWith('audio/'))
+    );
+
+    // Ensure audio requests have a text message
+    let processedMessage = message;
+    if (isAudioRequest && (!processedMessage || processedMessage.trim() === '')) {
+      processedMessage = "Please transcribe and respond to this audio.";
+      console.log("Added default text message for audio-only request");
+    }
+
     // Require at least a message, a file, or a fileUri
-    if (!message && !file && !fileUriString && !base64String) {
+    if (!processedMessage && !file && !fileUriString && !base64String) {
       return NextResponse.json({ error: 'Message, file, or file URI is required' }, { status: 400 });
     }
 
@@ -385,13 +409,39 @@ export async function POST(request: Request) {
       console.log("Successfully processed file data with mime type:", fileData?.mimeType || fileUri?.mimeType);
     }
 
+    // Extract and process audio file if present
+    let audioBase64 = null;
+    let audioMimeType = null;
+    const audio = formData.get('audio') as File | null;
+    if (audio) {
+      try {
+        console.log(`API route: Processing audio file ${audio.name}, type: ${audio.type}, size: ${audio.size} bytes`);
+        const audioBuffer = Buffer.from(await audio.arrayBuffer());
+        audioBase64 = audioBuffer.toString('base64');
+        audioMimeType = audio.type;
+        console.log(`API route: Successfully processed audio file: ${audioBase64.length} base64 chars`);
+      } catch (audioError) {
+        console.error("Error processing audio file:", audioError);
+        return Response.json({ error: "Failed to process audio file" }, { status: 400 });
+      }
+    }
+
+    // If audio file was processed, override file data with audio data
+    if (audioBase64 && audioMimeType) {
+      console.log("API route: Using processed audio file as fileData");
+      fileData = {
+        base64String: audioBase64,
+        mimeType: audioMimeType
+      };
+    }
+
     // --- Handle Llama Vision Model --- 
     if (modelName === 'meta-llama/Llama-Vision-Free') {
       if (!process.env.TOGETHER_API_KEY) {
         return NextResponse.json({ error: 'TOGETHER_API_KEY is not set. Llama Vision model is not available.' }, { status: 503 });
       }
       try {
-        const stream = await handleLlamaVisionRequest(message ?? '', serviceHistory, fileData, fileName);
+        const stream = await handleLlamaVisionRequest(processedMessage ?? '', serviceHistory, fileData, fileName);
         return new Response(stream, {
           headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
         });
@@ -410,7 +460,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'TOGETHER_API_KEY is not set. Together AI models are not available.' }, { status: 503 });
       }
       try {
-        const stream = await handleTogetherAIChatRequest(message ?? '', serviceHistory, modelName);
+        const stream = await handleTogetherAIChatRequest(processedMessage ?? '', serviceHistory, modelName);
         return new Response(stream, {
           headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
         });
@@ -420,15 +470,52 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: errorMessage }, { status: 500 });
       }
     }
-    // --- End Handle Together AI Models ---
-
-    // --- Handle Image Generation Model ---
-    if (modelName === "black-forest-labs/FLUX.1-schnell-Free") {
-      if (!message) { // Prompt is in the 'message' field for image generation
+    // --- Handle OpenRouter Models ---
+    else if (modelName === 'qwen/qwen2.5-vl-72b-instruct:free' || 
+             modelName === 'microsoft/phi-4-reasoning-plus:free') {
+      if (!process.env.OPENROUTER_API_KEY) {
+        return NextResponse.json({ error: 'OPENROUTER_API_KEY is not set. OpenRouter models are not available.' }, { status: 503 });
+      }
+      try {
+        const streamIterable = await openRouterService.generateResponse(processedMessage ?? '', serviceHistory, fileData, fileUri, modelName);
+        
+        // Convert AsyncIterable to ReadableStream
+        const readableStream = new ReadableStream({
+          async start(controller) {
+            const encoder = new TextEncoder();
+            try {
+              for await (const payloadChunk of streamIterable) {
+                controller.enqueue(encoder.encode(JSON.stringify(payloadChunk) + '\n'));
+              }
+              controller.close();
+            } catch (error) {
+              console.error(`Error reading from OpenRouter stream (${modelName}):`, error);
+              const errorPayload = { text: `[Error: ${error instanceof Error ? error.message : 'Unknown streaming error'}]` };
+              controller.enqueue(encoder.encode(JSON.stringify(errorPayload) + '\n'));
+              controller.close();
+            }
+          },
+          cancel() {
+            console.log(`OpenRouter stream (${modelName}) cancelled by client.`);
+          }
+        });
+        
+        return new Response(readableStream, {
+          headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
+        });
+      } catch (error) {
+        console.error(`API Route Error (OpenRouter Handler - ${modelName}):`, error);
+        const errorMessage = error instanceof Error ? error.message : `Error processing ${modelName} request`;
+        return NextResponse.json({ error: errorMessage }, { status: 500 });
+      }
+    }
+    // --- Handle FLUX Image Model --- 
+    else if (modelName === 'black-forest-labs/FLUX.1-schnell-Free') {
+      if (!processedMessage) { // Prompt is in the 'message' field for image generation
         return NextResponse.json({ error: 'Prompt (message) is required for image generation' }, { status: 400 });
       }
       // Directly call the image generation handler and return its response
-      return handleFluxImageRequest(message);
+      return handleFluxImageRequest(processedMessage);
     }
     // --- End Handle Image Generation Model ---
 
@@ -444,7 +531,7 @@ export async function POST(request: Request) {
 
     // Get the async iterable stream from the service, passing file data if available
     console.log("Calling service.generateResponse with:", {
-      messageLength: (message || "").length,
+      messageLength: (processedMessage || "").length,
       historyLength: serviceHistory.length,
       hasFileData: !!fileData,
       fileDataType: fileData?.mimeType,
@@ -456,8 +543,8 @@ export async function POST(request: Request) {
     try {
       // For Perplexity, don't pass file data
       const stream = isPerplexity 
-        ? await selectedService.generateResponse(message ?? '', serviceHistory, undefined, undefined, modelName ?? undefined)
-        : await selectedService.generateResponse(message ?? '', serviceHistory, fileData, fileUri, modelName ?? undefined);
+        ? await selectedService.generateResponse(processedMessage ?? '', serviceHistory, undefined, undefined, modelName ?? undefined)
+        : await selectedService.generateResponse(processedMessage ?? '', serviceHistory, fileData, fileUri, modelName ?? undefined);
 
       // Create a ReadableStream to send to the client
       const readableStream = new ReadableStream({

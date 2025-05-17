@@ -96,8 +96,8 @@ export class GeminiService implements LlmService {
     history: ChatMessage[] = [], 
     fileData?: FileData, 
     fileUri?: FileUri,
-    modelName: string = DEFAULT_MODEL_NAME // Add modelName parameter
-  ): Promise<AsyncIterable<{ text?: string; webSearchQueries?: string[]; renderedContent?: string }>> { // Updated return type
+    modelName: string = DEFAULT_MODEL_NAME
+  ): Promise<AsyncIterable<{ text?: string; webSearchQueries?: string[]; renderedContent?: string }>> {
     // Get the selected model configuration
     const selectedModelConfig = MODELS[modelName as keyof typeof MODELS] || MODELS[DEFAULT_MODEL_NAME];
     
@@ -128,7 +128,6 @@ export class GeminiService implements LlmService {
     const chatParams: StartChatParams = {
       history: sdkHistory,
       safetySettings: safetySettings,
-      // Add the system instruction here
       systemInstruction: systemInstruction,
     };
 
@@ -138,15 +137,28 @@ export class GeminiService implements LlmService {
 
         // Construct the parts for the current user message
         const currentUserParts: Part[] = [];
-        // Add text part if message is not empty
-        if (message.trim()) {
-            currentUserParts.push({ text: message });
+        
+        // 1. ALWAYS include the text part for the message
+        // If there's no text but we have audio, make sure to use a placeholder
+        // This is required by the Gemini API to avoid the "empty text parameter" error
+        if (message && message.trim()) {
+            // Use the provided message text if present
+            currentUserParts.push({ text: message.trim() });
+        } else if (fileData && fileData.mimeType.startsWith('audio/')) {
+            // For audio-only messages, add a placeholder text
+            // Required to avoid Gemini API's "empty text parameter" error
+            currentUserParts.push({ text: "Please transcribe and respond to this audio." });
+            console.log("Gemini Service: Empty text with audio. Added text placeholder for API.");
+        } else {
+            // In all other cases (e.g., image-only), still add at least an empty text
+            // to prevent potential API errors with some model versions
+            currentUserParts.push({ text: message || " " });
         }
         
-        // Add file part based on what was provided
+        // 2. Add the file part (image or audio)
         if (fileUri) {
             // Use fileUri for uploaded files (via Files API)
-            console.log(`Adding file from URI: ${fileUri.uri} (${fileUri.mimeType})`);
+            console.log(`Gemini Service: Adding file from URI: ${fileUri.uri} (${fileUri.mimeType})`);
             currentUserParts.push({
                 fileData: {
                     mimeType: fileUri.mimeType,
@@ -154,155 +166,93 @@ export class GeminiService implements LlmService {
                 }
             });
         } else if (fileData) {
-            // Use inline data (base64) for direct files
-            const isImage = fileData.mimeType.startsWith('image/');
-            const isAudio = fileData.mimeType.startsWith('audio/');
-            const fileType = isImage ? 'image' : isAudio ? 'audio' : 'unknown media';
-            
-            console.log(`Adding inline ${fileType} data with type: ${fileData.mimeType}, base64 length: ${fileData.base64String.length}`);
-            
             // Validate base64 data isn't empty
             if (!fileData.base64String || fileData.base64String.length === 0) {
-                console.error("Base64 string is empty - cannot add to message");
+                console.error("Gemini Service: Base64 string is empty");
                 return (async function*() { 
-                    yield { text: "[Error: Invalid base64 data for ${fileType}. Please try again with a different file.]" }; 
+                    yield { text: `[Error: Invalid file data. File content is empty.]` }; 
                 })();
             }
 
-            try {
-                currentUserParts.push({
-                    inlineData: {
-                        mimeType: fileData.mimeType,
-                        data: fileData.base64String
-                    }
-                });
-                console.log(`Successfully added inline ${fileType} to parts`);
-            } catch (error) {
-                console.error(`Error adding inline ${fileType} to parts:`, error);
-                return (async function*() { 
-                    yield { text: "[Error: Could not process ${fileType} data. Please try again.]" }; 
-                })();
-            }
+            // Use inline data (base64) for file
+            console.log(`Gemini Service: Adding inline ${fileData.mimeType} data, base64 length: ${fileData.base64String.length}`);
+            currentUserParts.push({
+                inlineData: {
+                    mimeType: fileData.mimeType,
+                    data: fileData.base64String
+                }
+            });
         }
 
         // Ensure we have something to send
         if (currentUserParts.length === 0) {
-            // This case should ideally be handled by the API route, but as a safeguard:
-            console.warn("Attempted to send an empty message to Gemini.");
-            // Adjust yield for new return type
-            return (async function*() { yield { text: "[Error: Cannot send empty message]" }; })();
+            console.warn("Gemini Service: Attempted to send a message with no parts");
+            return (async function*() { 
+                yield { text: "[Error: Cannot send an empty message]" }; 
+            })();
         }
 
-        // Extra logging for multimodal prompts
-        if (currentUserParts.length > 1) {
-            console.log(`Sending multimodal prompt with ${currentUserParts.length} parts:`);
-            currentUserParts.forEach((part, index) => {
-                if ('text' in part && part.text) {
-                    console.log(`Part ${index}: Text (${part.text.length} chars)`);
-                } else if ('inlineData' in part && part.inlineData) {
-                    console.log(`Part ${index}: ${part.inlineData.mimeType} (${part.inlineData.data.length} chars base64)`);
-                } else if ('fileData' in part && part.fileData) {
-                    console.log(`Part ${index}: File URI ${part.fileData.fileUri}`);
-                } else {
-                    console.log(`Part ${index}: Unknown part type`);
-                }
-        });
-        }
-
-        // Get the stream by sending the constructed parts
-        console.log("Sending to Gemini API with System Instruction:", {
-            model: selectedModelConfig.model, // Log the model being used
-            numParts: currentUserParts.length,
-            messageText: message ? message.substring(0, 100) + (message.length > 100 ? "..." : "") : "(none)",
-            hasFileData: !!fileData,
-            hasFileUri: !!fileUri
+        // Log what we're sending
+        console.log(`Gemini Service: Sending ${currentUserParts.length} parts to ${selectedModelConfig.model}`);
+        currentUserParts.forEach((part, index) => {
+            if ('text' in part && part.text) {
+                console.log(`Part ${index}: Text (${part.text.length} chars)`);
+            } else if ('inlineData' in part && part.inlineData) {
+                console.log(`Part ${index}: ${part.inlineData.mimeType} data (${part.inlineData.data.length} chars base64)`);
+            } else if ('fileData' in part && part.fileData) {
+                console.log(`Part ${index}: File URI ${part.fileData.fileUri}`);
+            } else {
+                console.log(`Part ${index}: Unknown part type`);
+            }
         });
         
+        // Send the message through the chat session
         const result = await chat.sendMessageStream(currentUserParts);
-        // Success - continue with normal processing
-        console.log(`Successfully initiated Gemini API stream with model ${selectedModelConfig.model}`);
+        console.log(`Gemini Service: Successfully initiated stream with ${selectedModelConfig.model}`);
 
-        // Return an async generator that yields text chunks
-        // We wrap this in another async generator to handle potential errors from the stream itself
+        // Return an async generator to yield text chunks and metadata
         return (async function*() {
             try {
                 for await (const chunk of result.stream) {
-                    // Check for text content in the chunk
-                    const textContent = chunk.text(); // text() helper gets all text from parts
+                    const textContent = chunk.text();
                     if (textContent) {
                         yield { text: textContent };
                     }
-
-                    // According to Gemini API docs, groundingMetadata (including webSearchQueries & renderedContent)
-                    // is typically part of the main candidate in the response, not necessarily streamed separately for each attribute.
-                    // We will collect it from the final response after the stream.
                 }
 
-                // After the stream has finished, get the complete response to check for grounding metadata.
+                // Get final response for metadata
                 const finalResponseData = await result.response;
                 const firstCandidate = finalResponseData.candidates?.[0];
                 
-                if (firstCandidate) {
-                    // For google_search, the metadata might be in several possible structures
-                    // Check both classic groundingMetadata and the newer structured format
-                    const groundingMetadata = firstCandidate.groundingMetadata;
-                    const searchInfo = firstCandidate.content?.parts?.find(part => part.functionCall?.name === 'google_search');
-                    
-                    if (groundingMetadata) {
-                        const webSearchQueries = groundingMetadata.webSearchQueries?.length ? groundingMetadata.webSearchQueries : undefined;
-                        const renderedContent = groundingMetadata.searchEntryPoint?.renderedContent;
-
-                        if (webSearchQueries || renderedContent) {
-                            console.log("Grounding metadata found in groundingMetadata:", { webSearchQueries, hasRenderedContent: !!renderedContent });
-                            yield { webSearchQueries: webSearchQueries, renderedContent: renderedContent };
-                        }
-                    } 
-                    // Alternative path for newer API structure
-                    else if (searchInfo && searchInfo.functionCall && 
-                            typeof searchInfo.functionCall === 'object' && 
-                            searchInfo.functionCall !== null &&
-                            'args' in searchInfo.functionCall && 
-                            typeof searchInfo.functionCall.args === 'object' &&
-                            searchInfo.functionCall.args !== null &&
-                            'searchResults' in searchInfo.functionCall.args) {
-                        try {
-                            const functionArgs = searchInfo.functionCall.args as {searchResults: string};
-                            const searchResults = JSON.parse(functionArgs.searchResults);
-                            if (Array.isArray(searchResults) && searchResults.length > 0) {
-                                // Extract search query from the results
-                                const webSearchQueries = [searchResults[0].query || "Related search"];
-                                console.log("Grounding metadata found in functionCall:", { webSearchQueries });
-                                yield { webSearchQueries };
-                            }
-                        } catch (parseError) {
-                            console.error("Error parsing search results:", parseError);
-                        }
+                if (firstCandidate?.groundingMetadata) {
+                    const metadata = firstCandidate.groundingMetadata;
+                    if (metadata.webSearchQueries?.length || metadata.searchEntryPoint?.renderedContent) {
+                        yield { 
+                            webSearchQueries: metadata.webSearchQueries,
+                            renderedContent: metadata.searchEntryPoint?.renderedContent
+                        };
                     }
                 }
-
             } catch (streamError) {
                 console.error("Error processing Gemini stream:", streamError);
-                // Adjust yield for new return type
-                yield { text: "\n\n[Error processing response stream]" };
+                yield { text: "\n\n[Error processing response: " + (streamError instanceof Error ? streamError.message : String(streamError)) + "]" };
             }
-        })(); // Immediately invoke the async generator function
+        })();
 
     } catch (error: unknown) {
-      console.error("Error initiating chat stream with Gemini:", error);
-      // Rethrow or handle initial setup errors appropriately
+      console.error("Error with Gemini:", error);
+      
+      // Helpful error messages based on common issues
       if (error instanceof Error) {
-          // Add more specific error handling for API key issues if not already covered
           if (error.message.includes("API_KEY_INVALID") || error.message.includes("API key not valid")) {
-               throw new Error(`Failed to initiate stream: Invalid or missing API Key. Please check your GEMINI_API_KEY environment variable.`);
+               throw new Error(`Invalid or missing API Key. Please check your GEMINI_API_KEY.`);
           }
-          // Handle model access issues - specifically for preview models
-          if (error.message.includes("Developer instruction is not enabled") || 
-              error.message.includes("not enabled for models")) {
-               throw new Error(`Access to model ${selectedModelConfig.model} is restricted. This preview model may require special access. Try using gemini-2.0-flash instead.`);
+          if (error.message.includes("empty text parameter")) {
+               throw new Error(`Gemini API requires a text parameter. Make sure messages aren't empty.`);
           }
-          throw new Error(`Failed to initiate stream with ${selectedModelConfig.model}: ${error.message}`);
+          throw new Error(`Gemini error: ${error.message}`);
       } else {
-          throw new Error(`An unexpected error occurred initiating stream with ${selectedModelConfig.model}: ${String(error)}`);
+          throw new Error(`Unexpected Gemini error: ${String(error)}`);
       }
     }
   }

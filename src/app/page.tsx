@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown';
 // Import next/image
 import Image from 'next/image'; 
 // Import Lucide React icons
-import { Paperclip, Mic, Square, X, Send, ArrowUp, History, Plus, Trash2, LogIn, LogOut, PlusCircle, MessageCirclePlus } from 'lucide-react';
+import { Paperclip, Mic, Square, X, Send, ArrowUp, History, Plus, Trash2, LogIn, LogOut, PlusCircle, MessageCirclePlus, Sun, Moon } from 'lucide-react';
 // Import markdown extensions
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -40,6 +40,7 @@ import {
 
 // Import AuthContext
 import { useAuth } from '../contexts/AuthContext';
+import { useTheme } from '../contexts/ThemeContext'; // Import useTheme
 
 // Import image storage utilities
 import { storeImageToFirebase, getImageFromStorage } from '../lib/imageStorage';
@@ -105,6 +106,7 @@ const processCitationMarkers = (text: string, citations?: string[]): React.React
 
 export default function ChatPage() {
   const { currentUser, authLoading } = useAuth(); // Use the auth context
+  const { theme, toggleTheme } = useTheme(); // Use the theme context
 
   const [inputValue, setInputValue] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -130,6 +132,7 @@ export default function ChatPage() {
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   
   // --- File Upload URI State ---
   const [uploadedFileInfo, setUploadedFileInfo] = useState<{
@@ -138,6 +141,7 @@ export default function ChatPage() {
     convertedType: string;
     base64: string;
     size: number;
+    url?: string; // Optional URL for image or audio
   } | null>(null);
   // --- End File Upload URI State ---
 
@@ -428,12 +432,12 @@ export default function ChatPage() {
       
       // Add userId property to link chats to users
       if (currentUser) {
-        await setDoc(chatDocRef, {
-          title: newTitle,
+      await setDoc(chatDocRef, {
+        title: newTitle,
           messages: cleanedMessages,
-          updatedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
           userId: currentUser.uid
-        }, { merge: true });
+      }, { merge: true });
       } else {
         // For guest mode, don't include userId
         await setDoc(chatDocRef, {
@@ -672,6 +676,8 @@ export default function ChatPage() {
     { value: 'black-forest-labs/FLUX.1-schnell-Free', label: 'FLUX.1 [schnell]' },
     { value: 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free', label: 'Llama 3.3 Instruct' },
     { value: 'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free', label: 'DeepSeek R1' },
+    { value: 'qwen/qwen2.5-vl-72b-instruct:free', label: 'Qwen2.5 VL 72B' },
+    { value: 'microsoft/phi-4-reasoning-plus:free', label: 'Phi-4 Reasoning Plus' },
     { value: 'sonar', label: 'Perplexity Sonar' },
     { value: 'sonar-pro', label: 'Perplexity Sonar Pro' },
   ];
@@ -814,41 +820,30 @@ export default function ChatPage() {
         setAudioUrl(null);
         setUploadedFileInfo(null);
 
-        // Using simple MIME type selection
-        let mimeType = 'audio/webm';
-        if (MediaRecorder.isTypeSupported('audio/mp3')) {
-          mimeType = 'audio/mp3';
-        } else if (MediaRecorder.isTypeSupported('audio/wav')) {
-          mimeType = 'audio/wav';
-        }
-        
-        console.log("Using MIME type for recording:", mimeType);
-
-        // Create recorder with the selected MIME type
-        const recorder = new MediaRecorder(stream, { mimeType });
+        // Create recorder with webm mimetype
+        const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
         setMediaRecorder(recorder);
         
-        // Store audio chunks locally within the function scope
-        const localAudioChunks: Blob[] = [];
+        const audioChunks: Blob[] = [];
         
         recorder.ondataavailable = (event) => {
           if (event.data.size > 0) {
             console.log(`Got audio chunk: ${event.data.size} bytes`);
-            localAudioChunks.push(event.data);
+            audioChunks.push(event.data);
           }
         };
 
         recorder.onstop = async () => {
-          console.log(`Recording stopped, collected ${localAudioChunks.length} chunks`);
+          console.log(`Recording stopped, collected ${audioChunks.length} chunks`);
           
-          if (localAudioChunks.length === 0) {
+          if (audioChunks.length === 0) {
             console.error("No audio data captured");
             setError("No audio data was captured. Please try again.");
             return;
           }
           
-          // Create blob from local chunks
-          const audioBlob = new Blob(localAudioChunks, { type: mimeType });
+          // Create blob from chunks
+          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
           console.log(`Created audio blob: ${audioBlob.size} bytes`);
           
           if (audioBlob.size === 0) {
@@ -860,24 +855,20 @@ export default function ChatPage() {
           // Create URL for audio preview
           const audioUrl = URL.createObjectURL(audioBlob);
           setAudioUrl(audioUrl);
+          setAudioBlob(audioBlob);
           
           // Create File object from blob
-          const fileName = `recording-${Date.now()}.${mimeType.split('/')[1]}`;
-          const file = new File([audioBlob], fileName, { type: mimeType });
+          const fileName = `recording-${Date.now()}.webm`;
+          const file = new File([audioBlob], fileName, { type: 'audio/webm' });
           console.log(`Created audio file: ${file.name}, ${file.size} bytes`);
           
           setSelectedFile(file);
           
           // Stop tracks
           stream.getTracks().forEach(track => track.stop());
-          
-          // Try to upload the file
-          if (file.size > 0) {
-            await uploadFile(file);
-          }
         };
 
-        // Start recording with 1 second data chunks
+        // Start recording
         recorder.start(1000);
         setIsRecording(true);
         console.log("Recording started");
@@ -892,10 +883,9 @@ export default function ChatPage() {
   };
 
   const stopRecording = () => {
-    if (mediaRecorder) {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
       mediaRecorder.stop(); // This triggers the onstop event
       setIsRecording(false);
-      // Note: The actual file creation happens in onstop
     }
   };
 
@@ -912,6 +902,7 @@ export default function ChatPage() {
         mediaRecorder.stop(); // Stop recording first
     }
     setAudioUrl(null);
+    setAudioBlob(null);
     setSelectedFile(null);
     // If mediaRecorder is still somehow active, ensure tracks are stopped
     if (mediaRecorder && mediaRecorder.stream) {
@@ -1022,131 +1013,128 @@ export default function ChatPage() {
       return;
     }
 
-    const activeChatId = await getOrCreateCurrentChatId();
-
+    // Ensure we have a valid chat ID
+    let activeChatId = currentChatId;
     if (!activeChatId) {
-      // Error would have been set by getOrCreateCurrentChatId
-      // setIsLoading(false) should also be handled there.
-      return;
+      try {
+        // Create a new chat in Firestore
+        const newChatRef = await addDoc(collection(db, 'chatThreads'), {
+          title: 'New Chat',
+          messages: [],
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+          userId: currentUser?.uid // Associate with user if logged in
+        });
+        activeChatId = newChatRef.id;
+        setCurrentChatId(newChatRef.id);
+        localStorage.setItem('currentChatId', newChatRef.id);
+        console.log("Created new chat with ID:", newChatRef.id);
+      } catch (err) {
+        console.error("Error creating new chat:", err);
+        setError("Failed to create chat session");
+        return;
+      }
     }
-
-    // Now, activeChatId is guaranteed to be a valid Firestore document ID.
-    // The currentChatId state should also be updated if it was a new chat.
-
-    const userMessageContent = inputValue.trim();
-
+    
+    // Capture current values before clearing
+    const userInput = inputValue.trim();
+    const hasAudio = audioBlob !== null && audioUrl !== null;
+    
+    // Show loading state
     setIsLoading(true);
     setError(null);
-
-    // Configure history to include images for vision models
-    const historyToSend = messages.map(msg => {
-      // For non-AI messages that include images and we're using a vision model
-      const isVisionModel = selectedModel === 'gemini-2.0-flash' || selectedModel === 'meta-llama/Llama-Vision-Free';
-      
-      if (msg.role === 'user' && msg.imageBase64Preview && isVisionModel) {
-        return {
-          ...msg,
-          // Keep imageBase64Preview in history for vision models
-        };
-      }
-      // For all other messages, just send the standard content
-      return {
-        role: msg.role,
-        content: msg.content
-      };
-    });
-
-    // Add user message to state (including file info if present)
+    
+    // Determine message content - for Gemini audio, use empty string in UI but a placeholder for API
+    const userMessageContent = userInput;
+    let apiMessageContent = userInput;
+    
+    // For Gemini audio-only messages, we need a placeholder in the API
+    if (!userInput && hasAudio && selectedModel.startsWith('gemini')) {
+      apiMessageContent = "Please transcribe and respond to this audio.";
+      console.log(`Audio-only for Gemini: Empty user message, API gets: "${apiMessageContent}"`);
+    }
+    
+    // Add user message to UI state
     const newUserMessage: Message = {
       role: 'user',
-      content: userMessageContent,
-      ...(uploadedFileInfo && {
-        fileType: uploadedFileInfo.originalType,
-        fileName: uploadedFileInfo.name,
-        // Store only the raw base64 data for images
-        ...(uploadedFileInfo.originalType.startsWith('image/') && { imageBase64Preview: uploadedFileInfo.base64 })
-      }),
-      ...(audioUrl && selectedFile && { // If there was a recording
+      content: userMessageContent, // Empty for audio-only
+      ...(audioUrl && {
         audioUrl: audioUrl,
-        fileType: selectedFile.type,
-        fileName: selectedFile.name,
+        fileType: 'audio/webm',
+        fileName: `recording-${Date.now()}.webm`,
       }),
+      ...(uploadedFileInfo && uploadedFileInfo.originalType.startsWith('image/') && {
+        imageBase64Preview: uploadedFileInfo.base64,
+        fileType: uploadedFileInfo.originalType
+      })
     };
-
-    setMessages((prevMessages) => {
-      const updatedMessages = [...prevMessages, newUserMessage];
-      // saveCurrentChat(updatedMessages); // Moved to useEffect for debouncing
-      return updatedMessages;
-    });
-    setInputValue('');
     
-    // --- Auto-scroll logic on new user message --- 
-    setIsAutoScrollingPaused(false); // Resume auto-scrolling for new messages
-    if (programmaticScrollTimeoutRef.current) clearTimeout(programmaticScrollTimeoutRef.current);
-    programmaticScrollTimeoutRef.current = setTimeout(() => {
-        if (messagesEndRef.current) {
-            messagesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        }
-        programmaticScrollTimeoutRef.current = null; // Clear the ref after scroll
-    }, 50); // Short delay to ensure new message is rendered
-    // --- End auto-scroll logic ---
-
-    // After submit, reset textarea height to 1 line equivalent
-    if (textareaRef.current) {
-        const ta = textareaRef.current;
-        const computedStyle = getComputedStyle(ta);
-        const paddingTop = parseFloat(computedStyle.paddingTop) || 0;
-        const paddingBottom = parseFloat(computedStyle.paddingBottom) || 0;
-        let lineHeight = parseFloat(computedStyle.lineHeight);
-        if (isNaN(lineHeight) || lineHeight <= 0) {
-            const fontSize = parseFloat(computedStyle.fontSize); 
-            lineHeight = (!isNaN(fontSize) && fontSize > 0) ? fontSize * 1.5 : 24;
-        }
-        lineHeight = Math.max(1, lineHeight);
-        ta.style.height = `${lineHeight + paddingTop + paddingBottom}px`;
+    // Add user message to messages state
+    setMessages(prev => [...prev, newUserMessage]);
+    
+    // Save to Firestore
+    try {
+      const chatDocRef = doc(db, 'chatThreads', activeChatId);
+      await setDoc(chatDocRef, {
+        updatedAt: serverTimestamp(),
+        messages: [...messages, newUserMessage].map(msg => ({
+          role: msg.role,
+          content: msg.content,
+          ...(msg.audioUrl && { audioUrl: msg.audioUrl }),
+          ...(msg.fileType && { fileType: msg.fileType }),
+          ...(msg.fileName && { fileName: msg.fileName }),
+          ...(msg.imageBase64Preview && { imageBase64Preview: msg.imageBase64Preview })
+        }))
+      }, { merge: true });
+    } catch (err) {
+      console.error("Error saving message to Firestore:", err);
+      // Continue anyway - the message is in the UI
     }
+    
+    // Add AI placeholder message
+    const aiPlaceholder: Message = { role: 'ai', content: '' };
+    setMessages(prev => [...prev, aiPlaceholder]);
+    const aiMessageIndex = messages.length + 1; // Current messages plus the user message we just added
+    
+    // Reset inputs
+    setInputValue('');
     setSelectedFile(null);
-    setAudioUrl(null); // Clear audio preview from input
-
-    // Add a placeholder for the AI response
-    const aiMessagePlaceholder: Message = { role: 'ai', content: '' };
-    setMessages((prevMessages) => {
-      const updatedMessages = [...prevMessages, aiMessagePlaceholder];
-      // saveCurrentChat(updatedMessages); // Moved to useEffect for debouncing
-      return updatedMessages;
-    });
-    const aiMessageIndex = messages.length + 1;
+    setAudioUrl(null);
+    setAudioBlob(null);
+    setUploadedFileInfo(null);
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+    }
+    
+    // Prepare form data for API call
+    const formData = new FormData();
+    formData.append('history', JSON.stringify(messages.map(msg => ({
+      role: msg.role === 'ai' ? 'model' : 'user',
+      content: msg.content
+    }))));
+    formData.append('modelName', selectedModel);
+    formData.append('message', apiMessageContent);
+    
+    // Add file data if we have it
+    if (uploadedFileInfo) {
+      formData.append('base64', uploadedFileInfo.base64);
+      formData.append('convertedType', uploadedFileInfo.convertedType);
+      formData.append('originalType', uploadedFileInfo.originalType);
+      formData.append('fileName', uploadedFileInfo.name);
+    } else if (audioBlob && hasAudio) {
+      // Directly append the audio blob
+      const audioFile = new File([audioBlob], `recording-${Date.now()}.webm`, { type: 'audio/webm' });
+      formData.append('audio', audioFile);
+      console.log("Added audio blob to form data:", audioFile.size, "bytes");
+    } else if (selectedFile) {
+      // For other files like images
+      formData.append('file', selectedFile);
+    }
+    
+    // Log form data for debugging
+    console.log("Form data keys:", Array.from(formData.keys()));
 
     try {
-      // Use FormData to send both text and file
-      const formData = new FormData();
-      
-      // Always include a message (even if empty) to avoid the 'Message required' error
-      formData.append('history', JSON.stringify(historyToSend));
-      formData.append('message', userMessageContent);
-      formData.append('modelName', selectedModel); // Pass the selected model
-      
-      // If we have preprocessed file data, use that
-      if (uploadedFileInfo) {
-        console.log("Sending preprocessed file data:", {
-          name: uploadedFileInfo.name,
-          type: uploadedFileInfo.convertedType,
-          size: uploadedFileInfo.size
-        });
-        
-        formData.append('base64', uploadedFileInfo.base64);
-        formData.append('convertedType', uploadedFileInfo.convertedType);
-        formData.append('originalType', uploadedFileInfo.originalType);
-        formData.append('fileName', uploadedFileInfo.name);
-      } 
-      // If we have an uploaded file URI, use that (keeping for future use)
-      else if (selectedFile) {
-        console.log("Sending direct file:", selectedFile.name);
-        formData.append('file', selectedFile);
-      }
-
-      console.log("Form data keys being sent:", Array.from(formData.keys()));
-
       const response = await fetch('/api/chat', {
         method: 'POST',
         body: formData,
@@ -1172,7 +1160,7 @@ export default function ChatPage() {
           if (updatedMessages[aiMessageIndex]) {
             updatedMessages[aiMessageIndex] = {
               role: 'ai',
-              content: payload.text || `Image generated for: "${userMessageContent}"`,
+              content: payload.text || `Image generated for: "${userInput}"`,
               imageBase64: payload.imageBase64
             };
           }
@@ -1195,7 +1183,6 @@ export default function ChatPage() {
       let currentWebSearchQueries: string[] | undefined = undefined;
       let currentRenderedContent: string | undefined = undefined;
       let currentSourceCitations: string[] | undefined = undefined;
-      const buffer = '' // Buffer for incomplete JSON strings
 
       while (!done) {
         const { value, done: streamDone } = await reader.read();
@@ -1288,9 +1275,6 @@ export default function ChatPage() {
         setMessages(prev => prev.slice(0, -1));
     } finally {
       setIsLoading(false);
-      setUploadedFileInfo(null); // Clear file URI after submission
-      // Clear audioUrl from state AFTER it's been saved to the message
-      setAudioUrl(null); 
     }
   };
 
@@ -1301,6 +1285,8 @@ export default function ChatPage() {
     'black-forest-labs/FLUX.1-schnell-Free': { hasAttachment: false, hasMic: false },
     'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free': { hasAttachment: false, hasMic: false },
     'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free': { hasAttachment: false, hasMic: false },
+    'qwen/qwen2.5-vl-72b-instruct:free': { hasAttachment: true, hasMic: false },
+    'microsoft/phi-4-reasoning-plus:free': { hasAttachment: false, hasMic: false },
     'sonar': { hasAttachment: false, hasMic: false },
     'sonar-pro': { hasAttachment: false, hasMic: false },
   };
@@ -1402,9 +1388,9 @@ export default function ChatPage() {
     
     try {
       // Only save current chat if it has content and a valid ID
-      if (messages.length > 0 && currentChatId && hasLoadedInitialChat.current) {
-        await saveCurrentChat(); // Save current work before starting new
-      }
+    if (messages.length > 0 && currentChatId && hasLoadedInitialChat.current) {
+      await saveCurrentChat(); // Save current work before starting new
+    }
       
       // Then start new chat - this should be a fast local operation
       setCurrentChatId(null);
@@ -1435,13 +1421,13 @@ export default function ChatPage() {
 
   if (authLoading) {
     return (
-      <div className="fixed inset-0 flex items-center justify-center bg-gray-50">
+      <div className="fixed inset-0 flex items-center justify-center bg-gray-50 dark:bg-black">
         <div className="text-center">
-          <svg className="mx-auto h-12 w-12 text-gray-400 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <svg className="mx-auto h-12 w-12 text-gray-400 dark:text-[#A6A6A6] animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
           </svg>
-          <p className="mt-2 text-sm text-gray-500">Loading...</p>
+          <p className="mt-2 text-sm text-gray-500 dark:text-[#A6A6A6]">Loading...</p>
         </div>
       </div>
     );
@@ -1451,73 +1437,102 @@ export default function ChatPage() {
   // The login sheet will be rendered as an overlay if needed.
   return (
     // Outermost div for full-width background - MODIFIED FOR NATIVE-LIKE VIEWPORT HANDLING
-    <div className="w-full bg-gray-50 fixed inset-0 flex flex-col">
+    <div className="w-full bg-gray-50 dark:bg-[#161616] fixed inset-0 flex flex-col">
       {/* Inner wrapper to constrain and center content - MODIFIED FOR NATIVE-LIKE VIEWPORT HANDLING */}
       <div className="max-w-3xl mx-auto flex flex-col h-full w-full">
         {/* Header - Solid Background, No Border - REMAINS flex-shrink: 0 implicitly */}
         <header 
-          className="bg-gray-50 pt-3 pb-3 sm:pt-4 sm:pb-4 text-center z-10 flex-shrink-0 flex items-center justify-between px-4"
+          className="bg-gray-50 dark:bg-[#161616] pt-3 pb-3 sm:pt-4 sm:pb-4 text-center z-10 flex-shrink-0 flex items-center justify-between px-4 border-b border-gray-200 dark:border-transparent"
         >
           {/* Left side of header: Conditional based on auth state */} 
           {authLoading ? (
-            <div className="w-1/3">{/* Placeholder for balance */}</div>
-          ) : currentUser ? ( // Show New Chat ONLY for logged-in users
-             <div className="w-1/3 flex justify-start">
+            <div className="w-1/3"></div>
+          ) : currentUser ? ( // Show New Chat & History for logged-in users
+             <div className="w-1/3 flex justify-start items-center gap-1 sm:gap-2">
                 <button 
                   onClick={handleHeaderNewChat}
-                  className="p-2 rounded-full hover:bg-gray-200 transition-colors" 
+                  className="p-2 rounded-full icon-button" 
                   title="New Chat"
                   aria-label="New Chat"
                 >
                   <MessageCirclePlus 
-                    className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700" 
+                    className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700 dark:text-[#C8C8C8]" 
                     style={{ transform: 'scaleX(-1)' }} // Flipped horizontally
                   /> 
                 </button>
+                <button 
+                  onClick={handleHeaderHistory}
+                  className="p-2 rounded-full icon-button"
+                  title="Chat History"
+                  aria-label="Chat History"
+                >
+                  <History className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700 dark:text-[#C8C8C8]" />
+                </button>
              </div>
           ) : (
-            <div className="w-1/3">{/* Placeholder if login sheet is up */}</div>
+            <div className="w-1/3"></div>
           )}
 
           {/* Center of header: Title */} 
           <div className="flex-grow text-center">
             {/* Always show SageMind title once auth is done loading */}
-            <h1 className="text-lg sm:text-xl font-semibold text-gray-800">SageMind</h1>
+            <h1 className="text-lg sm:text-xl font-semibold text-gray-800 dark:text-[#F9FAFB]">SageMind</h1>
           </div>
 
           {/* Right side of header: Auth/User actions */} 
           <div className="w-1/3 flex justify-end items-center gap-1 sm:gap-2">
             {authLoading ? (
-              <div className="h-8">{/* Placeholder to maintain height */}</div>
+              <div className="h-8"></div>
             ) : currentUser ? (
               <>
-                <button 
-                  onClick={handleHeaderHistory}
-                  className="p-2 rounded-full hover:bg-gray-200 transition-colors"
-                  title="Chat History"
-                  aria-label="Chat History"
+                {/* Theme toggle is now here, next to Sign Out */}
+                <button
+                  onClick={toggleTheme}
+                  className="p-2 rounded-full icon-button"
+                  title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+                  aria-label="Toggle theme"
                 >
-                  <History className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700" />
+                  {theme === 'light' ? (
+                    <Moon className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700 dark:text-[#C8C8C8]" />
+                  ) : (
+                    <Sun className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700 dark:text-[#C8C8C8]" />
+                  )}
                 </button>
+                {/* History button was here, moved to the left */}
                 <button 
                   onClick={handleSignOut}
-                  className="p-2 rounded-full hover:bg-gray-200 transition-colors"
+                  className="p-2 rounded-full icon-button"
                   title={`Sign Out (${currentUser.displayName || currentUser.email})`}
                   aria-label="Sign Out"
                 >
-                  <LogOut className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700" />
+                  <LogOut className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700 dark:text-[#C8C8C8]" />
                 </button>
               </>
             ) : isGuestMode ? (
               // Show Log In button for guests - clicking this should show the login drawer
-              <button 
-                onClick={() => setIsGuestMode(false)} // This will reveal the login bottom sheet
-                className="p-2 rounded-full hover:bg-gray-200 transition-colors"
-                title="Sign In"
-                aria-label="Sign In"
-              >
-                <LogIn className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700" />
-              </button>
+              // AND theme toggle
+              <>
+                <button
+                  onClick={toggleTheme} // Add theme toggle action
+                  className="p-2 rounded-full icon-button"
+                  title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+                  aria-label="Toggle theme"
+                >
+                  {theme === 'light' ? (
+                    <Moon className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700 dark:text-[#C8C8C8]" />
+                  ) : (
+                    <Sun className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700 dark:text-[#C8C8C8]" />
+                  )}
+                </button>
+                <button 
+                  onClick={() => setIsGuestMode(false)} // This will reveal the login bottom sheet
+                  className="p-2 rounded-full icon-button"
+                  title="Sign In"
+                  aria-label="Sign In"
+                >
+                  <LogIn className="w-5 h-5 sm:w-6 sm:w-6 text-gray-700 dark:text-[#C8C8C8]" />
+                </button>
+              </>
             ) : (
               // Placeholder if login sheet is up (user is not logged in and not guest)
               <div className="h-8"></div>
@@ -1528,14 +1543,14 @@ export default function ChatPage() {
         {/* Main content - Relative positioning for overlay - MODIFIED FOR NATIVE-LIKE VIEWPORT HANDLING */}
         <main 
           ref={chatContainerRef} // Assign ref to the main chat container
-          className="relative flex-grow overflow-y-auto min-h-0 chat-container"
+          className="relative flex-grow overflow-y-auto min-h-0 chat-container dark:bg-[#161616]"
           style={{ overflowX: 'hidden', overscrollBehaviorY: 'contain' }}
           onMouseMove={handleMouseMove}
           onScroll={handleChatScroll} // Add scroll event listener
         >
            {/* Fade Overlay */}
            <div 
-             className="sticky top-0 left-0 right-0 h-16 bg-gradient-to-b from-gray-50 to-transparent pointer-events-none z-5"
+             className="sticky top-0 left-0 right-0 h-16 bg-gradient-to-b from-gray-50 dark:from-[#161616] to-transparent pointer-events-none z-5"
              // Increased height (e.g., h-16)
            ></div>
            
@@ -1549,15 +1564,16 @@ export default function ChatPage() {
                 <div
                   className={`px-3 py-2 sm:px-4 sm:py-2 ${
                     msg.role === 'user'
-                      ? 'max-w-[80%] bg-gray-200 text-gray-800'
-                      : 'w-full bg-transparent text-gray-800'
-                  }`}
+                      ? 'max-w-[80%] dark:bg-[#292929] text-gray-800 dark:text-[#F9FAFB] user-bubble' // Added user-bubble class
+                      : 'w-full bg-transparent dark:bg-transparent text-gray-800 dark:text-[#F9FAFB]' // AI bubble: bg transparent
+                  } `}
                   style={msg.role === 'user' ? {
                     borderTopLeftRadius: '24px',
                     borderTopRightRadius: '24px',
                     borderBottomLeftRadius: '24px',
-                    borderBottomRightRadius: '8px'
-                  } : {}}
+                    borderBottomRightRadius: '8px',
+                    backgroundColor: 'var(--bubble-user)'
+                  } : { borderRadius: '24px' /* AI bubble also gets rounded corners */ }}
                 >
                   {msg.role === 'ai' ? (
                     <>
@@ -1566,34 +1582,35 @@ export default function ChatPage() {
                         rehypePlugins={[rehypeRaw, rehypeSanitize, rehypeHighlight]}
                         components={{
                           table: ({node, ...props}) => (
-                            <div className="my-6 overflow-x-auto rounded-2xl border border-gray-300">
+                            <div className="my-6 overflow-x-auto rounded-2xl border border-gray-300 dark:border-[#2F2F2E]">
                               <table className="min-w-full" {...props} />
                             </div>
                           ),
                           thead: ({node, ...props}) => (
-                            <thead className="bg-gray-100" {...props} />
+                            <thead className="bg-gray-100 dark:bg-[#1E1E1E]" {...props} />
                           ),
                           th: ({node, ...props}) => (
                             <th
-                              className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-r last:border-r-0 border-gray-200"
+                              className="px-4 py-3 text-left text-xs font-semibold text-gray-700 dark:text-[#A6A6A6] uppercase tracking-wider border-b border-r last:border-r-0 border-gray-200 dark:border-[#2F2F2E]"
                               {...props}
                             />
                           ),
                           tbody: ({node, ...props}) => (
-                            <tbody className="" {...props} />
+                            <tbody className="dark:divide-[#2F2F2E]" {...props} />
                           ),
                           tr: ({node, ...props}) => (
-                            <tr className="hover:bg-gray-100 transition-colors" {...props} />
+                            <tr className="hover:bg-gray-100 dark:hover:bg-[#1E1E1E] transition-colors" {...props} />
                           ),
                           td: ({node, ...props}) => (
-                            <td className="px-4 py-3 text-sm text-gray-700 border-b border-r last:border-r-0 border-gray-200" {...props} />
+                            <td className="px-4 py-3 text-sm text-gray-700 dark:text-[#A6A6A6] border-b border-r last:border-r-0 border-gray-200 dark:border-[#2F2F2E]" {...props} />
                           ),
                           // Custom text component to handle the citation links directly in markdown
                           text: ({children}) => {
                             if (typeof children === 'string' && msg.sourceCitations?.length) {
                               return <>{processCitationMarkers(children, msg.sourceCitations)}</>;
                             }
-                            return <>{children}</>;
+                            // Ensure AI text is also styled for dark mode
+                            return <span className="dark:text-[#F9FAFB]">{children}</span>;
                           },
                           code: ({ inline, className, children, ...props }: React.ComponentProps<'code'> & { inline?: boolean }) => { 
                             const match = /language-(\w+)/.exec(className || '');
@@ -1602,7 +1619,7 @@ export default function ChatPage() {
                             if (inline) {
                               return (
                                 <code 
-                                  className="px-1 py-0.5 bg-gray-100 text-pink-600 rounded text-sm font-mono overflow-wrap-break-word"
+                                  className="px-1 py-0.5 bg-gray-200 dark:bg-[#1E1E1E] text-pink-600 dark:text-pink-400 rounded text-sm font-mono overflow-wrap-break-word"
                                   data-language={highlightLanguage}
                                   {...props}
                                 >
@@ -1628,18 +1645,18 @@ export default function ChatPage() {
                               language = match?.[1] || '';
                             }
                             const preClassName = language === 'sql'
-                                ? "rounded-md bg-gray-900 my-4 p-4 font-mono text-sm text-gray-100"
-                                : "rounded-md bg-gray-50 my-4 p-4 font-mono text-sm text-gray-800";
+                                ? "rounded-md bg-gray-900 dark:bg-[#1E1E1E] my-4 p-4 font-mono text-sm text-gray-100 dark:text-[#F9FAFB]"
+                                : "rounded-md bg-gray-100 dark:bg-[#1E1E1E] my-4 p-4 font-mono text-sm text-gray-800 dark:text-[#F9FAFB]";
                             return <pre className={`${preClassName} whitespace-pre-wrap word-break-all overflow-x-hidden`} {...props}>{children}</pre>;
                           },
                           blockquote: ({node, ...props}) => (
-                            <blockquote className="pl-4 border-l-4 border-blue-400 italic text-gray-600 my-4 overflow-wrap-break-word" {...props} />
+                            <blockquote className="pl-4 border-l-4 border-blue-400 dark:border-blue-500 italic text-gray-600 dark:text-[#A6A6A6] my-4 overflow-wrap-break-word" {...props} />
                           ),
-                          li: ({node, ...props}) => <li className="ml-6 my-2 list-disc overflow-wrap-break-word" {...props} />,
-                          hr: ({node, ...props}) => <hr className="my-6 border-t border-gray-300" {...props} />,
+                          li: ({node, ...props}) => <li className="ml-6 my-2 list-disc text-gray-700 dark:text-[#A6A6A6] overflow-wrap-break-word" {...props} />,
+                          hr: ({node, ...props}) => <hr className="my-6 border-t border-gray-300 dark:border-[#2F2F2E]" {...props} />,
                           a: ({node, ...props}) => (
                             <a 
-                              className="text-blue-600 hover:text-blue-800 hover:underline overflow-wrap-break-word"
+                              className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline overflow-wrap-break-word"
                               target="_blank" 
                               rel="noopener noreferrer" 
                               {...props}
@@ -1647,27 +1664,27 @@ export default function ChatPage() {
                           ),
                           img: ({node, ...props}) => (
                             <img 
-                              className="max-w-full h-auto rounded-lg my-4 shadow-sm" 
+                              className="max-w-full h-auto rounded-lg my-4 shadow-sm dark:shadow-none"
                               alt={props.alt || 'Image loaded from markdown'} 
                               {...props} 
                             />
                           ),
-                          p: ({node, ...props}) => <p className="my-3 overflow-wrap-break-word" {...props} />,
-                          h1: ({node, ...props}) => <h1 className="text-2xl font-bold mt-6 mb-4 overflow-wrap-break-word" {...props} />,
-                          h2: ({node, ...props}) => <h2 className="text-xl font-bold mt-5 mb-3 overflow-wrap-break-word" {...props} />,
-                          h3: ({node, ...props}) => <h3 className="text-lg font-bold mt-4 mb-2 overflow-wrap-break-word" {...props} />,
+                          p: ({node, ...props}) => <p className="my-3 text-gray-800 dark:text-[#F9FAFB] overflow-wrap-break-word" {...props} />,
+                          h1: ({node, ...props}) => <h1 className="text-2xl font-bold mt-6 mb-4 text-gray-900 dark:text-[#F9FAFB] overflow-wrap-break-word" {...props} />,
+                          h2: ({node, ...props}) => <h2 className="text-xl font-bold mt-5 mb-3 text-gray-900 dark:text-[#F9FAFB] overflow-wrap-break-word" {...props} />,
+                          h3: ({node, ...props}) => <h3 className="text-lg font-bold mt-4 mb-2 text-gray-900 dark:text-[#A6A6A6] overflow-wrap-break-word" {...props} />,
                         }}
                       >
                         {msg.content}
                       </ReactMarkdown>
 
                       {msg.renderedContent && (
-                        <div className="mt-3 search-suggestions-container" dangerouslySetInnerHTML={{ __html: msg.renderedContent }} />
+                        <div className="mt-3 search-suggestions-container dark:text-[#F9FAFB]" dangerouslySetInnerHTML={{ __html: msg.renderedContent }} />
                       )}
 
                       {!msg.renderedContent && msg.webSearchQueries && msg.webSearchQueries.length > 0 && (
                         <div className="mt-3 search-suggestions-container">
-                          <p className="text-sm font-semibold text-gray-600 mb-1">Search Suggestions:</p>
+                          <p className="text-sm font-semibold text-gray-600 dark:text-[#A6A6A6] mb-1">Search Suggestions:</p>
                           <div className="flex flex-wrap gap-2" role="list">
                             {msg.webSearchQueries.map((query, i) => (
                               <a
@@ -1675,7 +1692,7 @@ export default function ChatPage() {
                                 href={`https://www.google.com/search?q=${encodeURIComponent(query)}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="search-chip"
+                                className="search-chip bg-gray-200 dark:bg-[#292929] text-gray-700 dark:text-[#F9FAFB] hover:bg-gray-300 dark:hover:bg-[#1E1E1E]"
                               >
                                 <img src="https://www.google.com/favicon.ico" alt="Google" />
                                 {query}
@@ -1690,7 +1707,7 @@ export default function ChatPage() {
                           <img
                             src={`data:image/jpeg;base64,${msg.imageBase64}`}
                             alt="Generated by AI"
-                            className="max-w-full md:max-w-md h-auto rounded-2xl cursor-pointer hover:opacity-80 transition-opacity"
+                            className="max-w-full md:max-w-md h-auto rounded-2xl cursor-pointer hover:opacity-80 transition-opacity dark:shadow-none"
                             onClick={() => handleOpenImageOverlay(`data:image/jpeg;base64,${msg.imageBase64}`)}
                           />
                         </div>
@@ -1701,7 +1718,7 @@ export default function ChatPage() {
                           <img
                             src={msg.imageUrl}
                             alt="Generated by AI"
-                            className="max-w-md h-auto rounded-lg cursor-pointer hover:opacity-80 transition-opacity"
+                            className="max-w-md h-auto rounded-lg cursor-pointer hover:opacity-80 transition-opacity dark:shadow-none"
                             onClick={() => msg.imageUrl && handleOpenImageOverlay(msg.imageUrl)}
                           />
                         </div>
@@ -1714,14 +1731,14 @@ export default function ChatPage() {
                           <img
                             src={`data:${msg.fileType};base64,${msg.imageBase64Preview}`}
                             alt={msg.fileName || 'User image preview'}
-                            className="mt-1 mb-1 max-h-20 w-auto rounded-md cursor-pointer hover:opacity-80 shadow-sm"
+                            className="mt-1 mb-1 max-h-20 w-auto rounded-md cursor-pointer hover:opacity-80 shadow-sm dark:shadow-none"
                             onClick={() => msg.imageBase64Preview && msg.fileType && handleOpenImageOverlay(`data:${msg.fileType};base64,${msg.imageBase64Preview}`)}
                           />
                         </div>
                       )}
 
                       {msg.content && msg.content.trim() && (
-                        <div className="w-full">{msg.content}</div>
+                        <div className="w-full dark:text-[#F9FAFB]">{msg.content}</div>
                       )}
 
                       {!msg.imageBase64Preview &&
@@ -1729,7 +1746,7 @@ export default function ChatPage() {
                        !msg.fileType?.startsWith('audio/') &&
                        !msg.fileType?.startsWith('image/') &&
                        msg.content !== `(File: ${msg.fileName})` && (
-                         <div className="mt-1 text-sm opacity-70 w-full">
+                         <div className="mt-1 text-sm opacity-70 dark:opacity-60 text-gray-600 dark:text-[#A6A6A6] w-full">
                            (File: {msg.fileName})
                          </div>
                       )}
@@ -1739,11 +1756,11 @@ export default function ChatPage() {
                           <audio
                             src={msg.audioUrl}
                             controls
-                            className="max-w-full max-h-8"
+                            className="max-w-full max-h-8 dark:[color-scheme:dark]" // Removed dark:bg-gray-700, let browser style with color-scheme
                             preload="metadata"
                           />
                           <div className="flex items-center justify-between mt-1">
-                            <span className="text-xs opacity-70">
+                            <span className="text-xs opacity-70 dark:opacity-60 text-gray-600 dark:text-[#A6A6A6]">
                               {msg.fileName || "Audio recording"}
                             </span>
                           </div>
@@ -1751,12 +1768,12 @@ export default function ChatPage() {
                       )}
 
                       {msg.renderedContent && (
-                        <div className="mt-3 search-suggestions-container" dangerouslySetInnerHTML={{ __html: msg.renderedContent }} />
+                        <div className="mt-3 search-suggestions-container dark:text-[#F9FAFB]" dangerouslySetInnerHTML={{ __html: msg.renderedContent }} />
                       )}
                       
                       {!msg.renderedContent && msg.webSearchQueries && msg.webSearchQueries.length > 0 && (
                         <div className="mt-3 search-suggestions-container">
-                          <p className="text-sm font-semibold text-gray-600 mb-1">Search Suggestions:</p>
+                          <p className="text-sm font-semibold text-gray-600 dark:text-[#A6A6A6] mb-1">Search Suggestions:</p>
                           <div className="flex flex-wrap gap-2" role="list">
                             {msg.webSearchQueries.map((query, i) => (
                               <a
@@ -1764,7 +1781,7 @@ export default function ChatPage() {
                                 href={`https://www.google.com/search?q=${encodeURIComponent(query)}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="search-chip"
+                                className="search-chip bg-gray-200 dark:bg-[#292929] text-gray-700 dark:text-[#F9FAFB] hover:bg-gray-300 dark:hover:bg-[#1E1E1E]"
                               >
                                 <img src="https://www.google.com/favicon.ico" alt="Google" />
                                 {query}
@@ -1784,24 +1801,24 @@ export default function ChatPage() {
       </main>
 
       {error && (
-          <div className="p-4 text-center text-red-600 bg-red-100 border-t border-red-200">
+          <div className="p-4 text-center text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900 border-t border-red-200 dark:border-red-700">
               Error: {error}
           </div>
       )}
 
         {/* Footer - Transparent Background - REMAINS flex-shrink: 0 */}
-        <footer className="p-3 bg-transparent flex-shrink-0">
+        <footer className="p-3 bg-transparent dark:bg-[#161616] flex-shrink-0"> {/* Added dark:bg for footer to ensure it has surface color */}
           <form onSubmit={handleSubmit} className="flex flex-col gap-0"> 
             {/* Main Input Container with very large border-radius for squircle-like appearance */}
             <div 
               className={`
                 p-3 
                 flex flex-col gap-2 
-                bg-gray-100 
+                bg-gray-100 dark:bg-[#1E1E1E]
                 shadow-sm 
                 ${isDraggingOver 
-                  ? 'border-2 border-dashed border-blue-500 ring-2 ring-blue-300' 
-                  : 'border border-gray-200'
+                  ? 'border-2 border-dashed border-blue-500 dark:border-blue-400 ring-2 ring-blue-300 dark:ring-blue-500' 
+                  : 'border border-gray-200 dark:border-[#2F2F2E]'
                 }
               `}
               style={{ 
@@ -1813,19 +1830,19 @@ export default function ChatPage() {
             >
               {/* Conditionally Render Preview Inside Main Container */}
               {(audioUrl || (uploadedFileInfo && uploadedFileInfo.base64 && uploadedFileInfo.originalType.startsWith('image/'))) && (
-                <div className="mb-2 pb-2 border-b border-gray-200 flex items-center justify-between">
+                <div className="mb-2 pb-2 border-b border-gray-200 dark:border-[#2F2F2E] flex items-center justify-between">
                   {/* Display audio preview */} 
                   {audioUrl && (
                     <div className="flex items-center gap-2 flex-grow min-w-0">
                       <audio 
                         src={audioUrl!} 
                         controls 
-                        className="max-h-8 w-full rounded-full border border-gray-300 p-0.5 bg-transparent"
+                        className="max-h-8 w-full rounded-full border border-gray-300 dark:border-[#2F2F2E] p-0.5 bg-transparent dark:[color-scheme:dark]"
                       />
                       <button 
                         type="button" 
                         onClick={clearRecording} 
-                        className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-50 flex-shrink-0"
+                        className="text-red-500 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 p-1 rounded-full hover:bg-red-50 dark:hover:bg-red-900 flex-shrink-0"
                         aria-label="Clear recording"
                         title="Clear recording"
                       >
@@ -1843,16 +1860,16 @@ export default function ChatPage() {
                           alt="Preview" 
                           layout="fill"
                           objectFit="contain"
-                          className="rounded border border-gray-300"
+                          className="rounded border border-gray-300 dark:border-[#2F2F2E]"
                         />
                       </div>
-                      <span className="text-sm text-gray-700 truncate flex-grow min-w-0" title={uploadedFileInfo.name}>
+                      <span className="text-sm text-gray-700 dark:text-[#A6A6A6] truncate flex-grow min-w-0" title={uploadedFileInfo.name}>
                         {uploadedFileInfo.name}
                       </span>
                       <button 
                         type="button" 
                         onClick={() => setUploadedFileInfo(null)} 
-                        className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-50 flex-shrink-0"
+                        className="text-red-500 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 p-1 rounded-full hover:bg-red-50 dark:hover:bg-red-900 flex-shrink-0"
                         aria-label="Clear image"
                         title="Clear image"
                       >
@@ -1872,7 +1889,7 @@ export default function ChatPage() {
                   onChange={(e) => setInputValue(e.target.value)}
                   placeholder="Message SageMind..."
                   disabled={isLoading}
-                  className="flex-grow bg-transparent focus:outline-none text-gray-900 text-base placeholder-gray-500 resize-none overflow-y-auto pr-2"
+                  className="flex-grow bg-transparent focus:outline-none text-gray-900 dark:text-[#F9FAFB] text-base placeholder-gray-500 dark:placeholder-[#A6A6A6] resize-none overflow-y-auto pr-2"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
@@ -1892,12 +1909,12 @@ export default function ChatPage() {
                   <button
                     onClick={handleModelDropdownToggle}
                     disabled={isLoading}
-                    className="flex items-center justify-between bg-gray-200 border border-gray-300 text-gray-700 text-xs hover:bg-gray-300 transition-colors cursor-pointer py-1.5 pl-2 pr-1.5"
+                    className="flex items-center justify-between border text-xs cursor-pointer py-1.5 pl-2 pr-1.5 model-dropdown-toggle"
                     style={{ borderRadius: '12px', width: '140px' }}
                     title="Select AI Model"
                   >
                     <span className="truncate">{currentModelLabel}</span>
-                    <svg className={`ml-1 h-3 w-3 text-gray-500 transform transition-transform ${isModelDropdownOpen ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                    <svg className={`ml-1 h-3 w-3 transform transition-transform ${isModelDropdownOpen ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                       <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
                     </svg>
                   </button>
@@ -1905,14 +1922,14 @@ export default function ChatPage() {
                   {/* Dropdown Menu - Modified to open upward */}
                   {isModelDropdownOpen && (
                     <div 
-                      className="absolute left-0 bottom-full mb-1 w-full bg-gray-100 border border-gray-300 shadow-sm z-20 overflow-hidden model-dropdown visible"
+                      className="absolute left-0 bottom-full mb-1 w-full border shadow-sm z-20 overflow-hidden model-dropdown visible"
                       style={{ borderRadius: '12px' }}
                     >
                       <div className="max-h-56 overflow-y-auto py-1">
                         {modelOptions.map((option) => (
                           <button
                             key={option.value}
-                            className={`w-full text-left px-3 py-2 text-xs text-gray-700 focus:outline-none hover:bg-gray-200 transition-colors ${selectedModel === option.value ? 'bg-gray-200 font-medium' : ''}`}
+                            className={`w-full text-left px-3 py-2 text-xs focus:outline-none transition-colors model-dropdown-item ${selectedModel === option.value ? 'selected' : ''}`}
                             onClick={(e) => {
                               e.stopPropagation();
                               setSelectedModel(option.value);
@@ -1935,7 +1952,7 @@ export default function ChatPage() {
                     type="button" 
                     onClick={() => fileInputRef.current?.click()} 
                     disabled={isLoading || !modelCapabilities[selectedModel]?.hasAttachment}
-                    className={`p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 flex items-center justify-center bg-gray-100 ${(!modelCapabilities[selectedModel]?.hasAttachment && !isLoading) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    className={`p-1.5 text-gray-600 dark:text-[#C8C8C8] flex items-center justify-center bg-gray-100 dark:bg-[#1E1E1E] icon-button ${(!modelCapabilities[selectedModel]?.hasAttachment && !isLoading) ? 'opacity-50 cursor-not-allowed' : ''}`}
                     style={{ borderRadius: '14px' }} // Squircle-like for button
                     aria-label="Attach file"
                     title={modelCapabilities[selectedModel]?.hasAttachment ? "Attach image or audio file" : "File attachment not supported for this model"}
@@ -1956,7 +1973,7 @@ export default function ChatPage() {
                     type="button" 
                     onClick={toggleRecording}
                     disabled={isLoading || !modelCapabilities[selectedModel]?.hasMic}
-                    className={`p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 flex items-center justify-center ${isRecording ? 'text-red-600 bg-red-100' : 'bg-gray-100'} ${(!modelCapabilities[selectedModel]?.hasMic && !isLoading) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    className={`p-1.5 text-gray-600 dark:text-[#C8C8C8] flex items-center justify-center ${isRecording ? 'text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900' : 'bg-gray-100 dark:bg-[#1E1E1E]'} icon-button ${(!modelCapabilities[selectedModel]?.hasMic && !isLoading) ? 'opacity-50 cursor-not-allowed' : ''}`}
                     style={{ borderRadius: '14px' }} // Squircle-like for button
                     aria-label={isRecording ? "Stop recording" : "Start recording"}
                     title={modelCapabilities[selectedModel]?.hasMic ? (isRecording ? "Stop recording" : "Record audio") : "Microphone not supported for this model"}
@@ -1971,8 +1988,8 @@ export default function ChatPage() {
                   <button
                     type="submit" 
                     disabled={isLoading || (!inputValue.trim() && !selectedFile && !uploadedFileInfo && !audioUrl)}
-                    className="p-2 bg-transparent text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-700 focus:ring-offset-2 focus:ring-offset-gray-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square cursor-pointer"
-                    style={{ borderRadius: '16px', backgroundColor: 'rgba(0,0,0,0.9)' }} // Made semi-transparent
+                    className="p-2 send-button focus:outline-none focus:ring-2 focus:ring-gray-700 dark:focus:ring-gray-300 focus:ring-offset-2 focus:ring-offset-gray-100 dark:focus:ring-offset-[#161616] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square cursor-pointer button"
+                    style={{ borderRadius: '16px' }}
                     title="Send message"
                   >
                     <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
@@ -1983,8 +2000,8 @@ export default function ChatPage() {
           </form>
 
           {/* Footer Text (Outside Main Container) */}
-          <div className="text-center text-xs text-gray-500 mt-2">
-            Experiment by <a href="https://x.com/siddhantpetkar" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-700">@sidpetkar</a>
+          <div className="text-center text-xs text-gray-800 dark:text-[#F9FAFB] mt-2">
+            Experiment by <a href="https://x.com/siddhantpetkar" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-700 dark:hover:text-[#F9FAFB]">@sidpetkar</a>
           </div>
         </footer>
       </div>
@@ -1993,33 +2010,33 @@ export default function ChatPage() {
       {!currentUser && !isGuestMode && (
         // Outermost container for backdrop blur and bottom alignment
         // On md screens and up, justify-center to vertically center the sheet
-        <div className="fixed inset-0 bg-[rgba(0,0,0,0.4)] backdrop-blur-sm z-40 flex flex-col justify-end md:justify-center items-center">
+        <div className="fixed inset-0 bg-[rgba(0,0,0,0.4)] dark:bg-[rgba(0,0,0,0.6)] backdrop-blur-sm z-40 flex flex-col justify-end md:justify-center items-center">
           {/* Bottom Sheet Drawer */}
           {/* On md screens and up, use rounded-3xl for all-around corners */}
-          <div className="bg-gray-50 w-full max-w-md p-6 sm:p-8 rounded-t-3xl md:rounded-3xl shadow-[0_-6px_20px_rgba(0,0,0,0.08)]">
+          <div className="bg-gray-50 dark:bg-[#161616] w-full max-w-md p-6 sm:p-8 rounded-t-3xl md:rounded-3xl shadow-[0_-6px_20px_rgba(0,0,0,0.08)] dark:shadow-[0_-6px_20px_rgba(0,0,0,0.2)]">
             <div className="text-center space-y-5 sm:space-y-6">
               <div>
-                <h1 className="text-3xl sm:text-4xl font-bold text-gray-800">SageMind</h1>
-                <p className="mt-2 text-sm sm:text-md text-gray-600">Where Wisdom Meets Wild Ideas</p>
+                <h1 className="text-3xl sm:text-4xl font-bold text-gray-800 dark:text-[#F9FAFB]">SageMind</h1>
+                <p className="mt-2 text-sm sm:text-md text-gray-800 dark:text-[#F9FAFB]">Where Wisdom Meets Wild Ideas</p>
               </div>
               
               <button
                 onClick={handleSignInWithGoogle}
-                className="w-full flex items-center justify-center bg-white text-gray-700 font-medium py-3 px-4 border border-gray-300 rounded-full shadow-sm hover:bg-gray-100 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 text-base sm:text-lg"
+                className="w-full flex items-center justify-center bg-white hover:bg-gray-50 dark:bg-white dark:hover:bg-gray-50 text-gray-800 font-medium py-3 px-4 border border-gray-300 rounded-full shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 text-base sm:text-lg"
               >
                 <Image src="/g-logo.png" alt="Google logo" width={24} height={24} className="mr-3" />
-                Continue with Google
+                <span>Continue with Google</span>
               </button>
               
               <button
                 onClick={handleSkipLogin}
-                className="w-full text-gray-600 hover:text-gray-800 underline text-sm py-2 transition-colors"
+                className="w-full text-gray-800 dark:text-[#F9FAFB] hover:text-gray-800 dark:hover:text-[#F9FAFB] underline text-sm py-2 transition-colors"
               >
                 Skip
               </button>
 
-              <div className="pt-2 text-center text-xs text-gray-500">
-                  Experiment by <a href="https://x.com/siddhantpetkar" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-700">@sidpetkar</a>
+              <div className="pt-2 text-center text-xs text-gray-800 dark:text-[#F9FAFB]">
+                  Experiment by <a href="https://x.com/siddhantpetkar" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-700 dark:hover:text-[#F9FAFB]">@sidpetkar</a>
               </div>
             </div>
           </div>
@@ -2029,35 +2046,35 @@ export default function ChatPage() {
       {/* History Modal */}
       {isHistoryModalOpen && (
         <div 
-          className="fixed inset-0 bg-[rgba(0,0,0,0.4)] backdrop-blur-sm z-45 flex items-center justify-center p-4" // Reverted to original bg, kept z-45
+          className="fixed inset-0 bg-[rgba(0,0,0,0.4)] dark:bg-[rgba(0,0,0,0.6)] backdrop-blur-sm z-45 flex items-center justify-center p-4" // Reverted to original bg, kept z-45
           onClick={() => {
             setIsHistoryModalOpen(false);
           }}
         >
           <div 
-            className="bg-white shadow-xl p-4 sm:p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto flex flex-col history-modal"
+            className="bg-white dark:bg-[#1E1E1E] shadow-xl p-4 sm:p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto flex flex-col history-modal"
             style={{ borderRadius: '28px' }}
             onClick={(e) => e.stopPropagation()} 
           >
-            <div className="flex justify-between items-center mb-4 flex-shrink-0">
-              <h2 className="text-xl font-semibold text-gray-800 pl-2">History</h2>
-              <button onClick={() => setIsHistoryModalOpen(false)} className="text-gray-500 hover:text-gray-700">
+            <div className="flex justify-between items-center mb-4 flex-shrink-0 border-b border-gray-200 dark:border-[#2F2F2E] pb-3">
+              <h2 className="text-xl font-semibold text-gray-800 dark:text-[#F9FAFB] pl-2">History</h2>
+              <button onClick={() => setIsHistoryModalOpen(false)} className="text-gray-500 dark:text-[#C8C8C8] icon-button p-1.5">
                 <X className="w-6 h-6" />
               </button>
             </div>
             {chatHistory.length === 0 ? (
-              <p className="text-gray-600 text-center py-4">No chat history found.</p>
+              <p className="text-gray-600 dark:text-[#A6A6A6] text-center py-4">No chat history found.</p>
             ) : (
               <ul className="space-y-2 history-chat-list">
                 {chatHistory.map((chatThread) => (
                   <li 
                     key={chatThread.id} 
                     onClick={() => handleLoadChatFromHistory(chatThread.id)}
-                    className="p-3 bg-gray-50 hover:bg-gray-100 rounded-md cursor-pointer flex justify-between items-center group"
+                    className="p-3 bg-gray-50 dark:bg-[#292929] hover:bg-gray-200 dark:hover:bg-[#1E1E1E] rounded-md cursor-pointer flex justify-between items-center group"
                   >
                     <div className="flex-grow min-w-0"> 
-                      <p className="font-medium text-gray-700 group-hover:text-blue-600 transition-colors truncate pr-2" title={chatThread.title || 'Untitled Chat'}>{chatThread.title || 'Untitled Chat'}</p>
-                      <p className="text-xs text-gray-500">
+                      <p className="font-medium text-gray-700 dark:text-[#F9FAFB] group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors truncate pr-2" title={chatThread.title || 'Untitled Chat'}>{chatThread.title || 'Untitled Chat'}</p>
+                      <p className="text-xs text-gray-500 dark:text-[#A6A6A6]">
                         {formatChatTimestamp(chatThread.updatedAt || chatThread.createdAt)}
                       </p>
                     </div>
@@ -2066,7 +2083,7 @@ export default function ChatPage() {
                         e.stopPropagation();
                         handleDeleteChat(chatThread.id); 
                       }}
-                      className="text-gray-400 hover:text-red-500 p-1.5 rounded-full hover:bg-red-100 transition-colors flex-shrink-0 ml-2"
+                      className="text-gray-400 dark:text-[#C8C8C8] hover:text-red-500 dark:hover:text-red-400 p-1.5 icon-button flex-shrink-0 ml-2"
                       title="Delete chat"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -2082,7 +2099,7 @@ export default function ChatPage() {
       {/* Image Overlay - Centered with Blur Backdrop */} 
       {isImageOverlayOpen && overlayImageUrl && (
         <div 
-          className="fixed inset-0 bg-[rgba(0,0,0,0.5)] backdrop-blur-md z-50 flex items-center justify-center p-4 transition-opacity duration-300 ease-in-out"
+          className="fixed inset-0 bg-[rgba(0,0,0,0.5)] dark:bg-[rgba(0,0,0,0.7)] backdrop-blur-md z-50 flex items-center justify-center p-4 transition-opacity duration-300 ease-in-out"
           onClick={handleCloseImageOverlay} // Close on backdrop click
         >
           {/* Modal content area: container for the image and buttons */}
@@ -2093,13 +2110,13 @@ export default function ChatPage() {
             <img 
               src={overlayImageUrl} 
               alt="Preview" 
-              className="block object-contain max-w-[calc(90vw-2rem)] max-h-[calc(90vh-2rem)] rounded-2xl" // Image controls its size, rounded to match parent, adjusted max size for padding of overlay
+              className="block object-contain max-w-[calc(90vw-2rem)] max-h-[calc(90vh-2rem)] rounded-2xl" 
             />
             {/* Buttons container: top-right of the modal content area */}
             <div className="absolute top-2 right-2 flex gap-2 sm:top-3 sm:right-3 z-10">
               <button
                 onClick={handleDownloadImage}
-                className="aspect-square w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center p-2 bg-[rgba(0,0,0,0.6)] text-white rounded-full hover:bg-[rgba(0,0,0,0.8)] transition-colors"
+                className="aspect-square w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center p-2 bg-[rgba(0,0,0,0.6)] dark:bg-[rgba(20,20,20,0.7)] text-white icon-button"
                 title="Download image"
                 aria-label="Download image"
               >
@@ -2111,7 +2128,7 @@ export default function ChatPage() {
               </button>
               <button 
                 onClick={handleCloseImageOverlay}
-                className="aspect-square w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center p-2 bg-[rgba(0,0,0,0.6)] text-white rounded-full hover:bg-[rgba(0,0,0,0.8)] transition-colors"
+                className="aspect-square w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center p-2 bg-[rgba(0,0,0,0.6)] dark:bg-[rgba(20,20,20,0.7)] text-white icon-button"
                 title="Close preview"
                 aria-label="Close preview"
               >

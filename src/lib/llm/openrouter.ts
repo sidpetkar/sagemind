@@ -160,21 +160,22 @@ export class OpenRouterService implements LlmService {
       let lastChunkTime = Date.now();
       const TIMEOUT_MS = 30000; // 30 second timeout for inactive stream
 
-      while (true) {
+      mainLoop: while (true) {
         // Check for timeout between chunks
         if (Date.now() - lastChunkTime > TIMEOUT_MS) {
           console.warn(`OpenRouter stream timeout for ${modelId} after ${TIMEOUT_MS}ms of inactivity`);
-          // If we have a partial response, add a completion note
-          if (fullResponseText.length > 0 && isPhiReasoningModel) {
+          if (isPhiReasoningModel && fullResponseText.length > 0) {
             yield { text: "\n\n(Response was incomplete - timed out)" };
           }
-          break;
+          // No special buffer processing here; it will be handled after the loop
+          break mainLoop;
         }
 
         const { value, done } = await reader.read();
         if (done) {
           console.log(`OpenRouter stream for ${modelId} completed normally`);
-          break;
+          // No special buffer processing here; it will be handled after the loop
+          break mainLoop;
         }
 
         // Reset timeout timer on new data
@@ -196,6 +197,7 @@ export class OpenRouterService implements LlmService {
           const jsonString = line.startsWith('data: ') ? line.slice(6) : line;
 
           try {
+            // Attempt to parse the JSON string
             const json = JSON.parse(jsonString);
             const content = json.choices?.[0]?.delta?.content;
             
@@ -260,17 +262,51 @@ export class OpenRouterService implements LlmService {
                   yield { text: content };
                 }
               } else {
-                // Normal processing for other models
+                // For other models like Qwen, yield directly
                 yield { text: content };
               }
             }
-          } catch (e) {
-            console.error('Error parsing JSON from stream:', e);
-            console.error('Problematic line:', line);
+          } catch (error) {
+            let errorMessage = "Unknown parsing error";
+            if (error instanceof Error) {
+              errorMessage = error.message;
+            }
+            // If parsing fails, it might be a non-JSON line (e.g., status message)
+            console.warn(`Skipping non-JSON line from OpenRouter stream: "${jsonString}", Error: ${errorMessage}`);
+            continue; // Skip this line and proceed to the next
+          }
+        }
+      } // End of mainLoop
+
+      // After the loop (handles both 'done' and 'timeout' exits)
+      // Process any remaining data in the buffer
+      if (buffer.trim()) {
+        const finalBufferedLine = buffer.trim();
+        // Skip empty lines or [DONE] signal if it's the only thing left
+        if (finalBufferedLine && finalBufferedLine !== 'data: [DONE]') {
+          const jsonString = finalBufferedLine.startsWith('data: ') ? finalBufferedLine.slice(6) : finalBufferedLine;
+          try {
+            const json = JSON.parse(jsonString);
+            const content = json.choices?.[0]?.delta?.content;
+            if (content) {
+              if (isPhiReasoningModel) {
+                fullResponseText += content; // Add to fullResponseText for Phi logging/state
+                yield { text: content };   // Yield the raw content
+              } else { // For other models like Qwen
+                yield { text: content };
+              }
+            }
+          } catch (error) {
+            let errorMessage = "Unknown parsing error";
+            if (error instanceof Error) {
+              errorMessage = error.message;
+            }
+            console.warn(`Skipping non-JSON final buffer content (after loop) from OpenRouter stream: "${jsonString}", Error: ${errorMessage}`);
           }
         }
       }
-      
+      // buffer = ''; // Clear buffer - good practice, though not strictly necessary if function ends
+
       // At the end of a complete response with no timeout
       // For Phi model, if we detected thinking patterns but no final answer,
       // add a note to indicate the response is complete

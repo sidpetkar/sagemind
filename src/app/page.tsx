@@ -118,7 +118,7 @@ export default function ChatPage() {
   const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false); // State for drag-over visual cue
 
   // --- Model Selection State ---
-  const [selectedModel, setSelectedModel] = useState<string>('gemini-2.0-flash'); // Default model
+  const [selectedModel, setSelectedModel] = useState<string>('gpt-4o-mini'); // Default model changed
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState<boolean>(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null); // Ref for the main chat container
@@ -672,12 +672,12 @@ export default function ChatPage() {
   // Define the model options
   const modelOptions = [
     { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+    { value: 'gpt-4o-mini', label: 'GPT-4o mini' },
     { value: 'meta-llama/Llama-Vision-Free', label: 'Llama Vision' },
     { value: 'black-forest-labs/FLUX.1-schnell-Free', label: 'FLUX.1 [schnell]' },
     { value: 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free', label: 'Llama 3.3 Instruct' },
     { value: 'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free', label: 'DeepSeek R1' },
     { value: 'qwen/qwen2.5-vl-72b-instruct:free', label: 'Qwen2.5 VL 72B' },
-    { value: 'microsoft/phi-4-reasoning-plus:free', label: 'Phi-4 Reasoning Plus' },
     { value: 'sonar', label: 'Perplexity Sonar' },
     { value: 'sonar-pro', label: 'Perplexity Sonar Pro' },
   ];
@@ -1013,6 +1013,23 @@ export default function ChatPage() {
       return;
     }
 
+    // Capture current values before clearing
+    const userInput = inputValue.trim();
+    const currentSelectedFile = selectedFile;
+    const currentAudioBlob = audioBlob;
+    const currentAudioUrl = audioUrl;
+    const currentUploadedFileInfo = uploadedFileInfo;
+    
+    // Reset inputs IMMEDIATELY to improve UI responsiveness
+    setInputValue('');
+    setSelectedFile(null);
+    setAudioUrl(null);
+    setAudioBlob(null);
+    setUploadedFileInfo(null);
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+    }
+    
     // Ensure we have a valid chat ID
     let activeChatId = currentChatId;
     if (!activeChatId) {
@@ -1036,10 +1053,6 @@ export default function ChatPage() {
       }
     }
     
-    // Capture current values before clearing
-    const userInput = inputValue.trim();
-    const hasAudio = audioBlob !== null && audioUrl !== null;
-    
     // Show loading state
     setIsLoading(true);
     setError(null);
@@ -1049,7 +1062,7 @@ export default function ChatPage() {
     let apiMessageContent = userInput;
     
     // For Gemini audio-only messages, we need a placeholder in the API
-    if (!userInput && hasAudio && selectedModel.startsWith('gemini')) {
+    if (!userInput && currentAudioBlob && selectedModel.startsWith('gemini')) {
       apiMessageContent = "Please transcribe and respond to this audio.";
       console.log(`Audio-only for Gemini: Empty user message, API gets: "${apiMessageContent}"`);
     }
@@ -1058,14 +1071,14 @@ export default function ChatPage() {
     const newUserMessage: Message = {
       role: 'user',
       content: userMessageContent, // Empty for audio-only
-      ...(audioUrl && {
-        audioUrl: audioUrl,
-        fileType: 'audio/webm',
+      ...(currentAudioUrl && {
+        audioUrl: currentAudioUrl, // Use captured value
+        fileType: 'audio/webm', // Assuming webm, adjust if dynamic
         fileName: `recording-${Date.now()}.webm`,
       }),
-      ...(uploadedFileInfo && uploadedFileInfo.originalType.startsWith('image/') && {
-        imageBase64Preview: uploadedFileInfo.base64,
-        fileType: uploadedFileInfo.originalType
+      ...(currentUploadedFileInfo && currentUploadedFileInfo.originalType.startsWith('image/') && {
+        imageBase64Preview: currentUploadedFileInfo.base64,
+        fileType: currentUploadedFileInfo.originalType
       })
     };
     
@@ -1096,16 +1109,6 @@ export default function ChatPage() {
     setMessages(prev => [...prev, aiPlaceholder]);
     const aiMessageIndex = messages.length + 1; // Current messages plus the user message we just added
     
-    // Reset inputs
-    setInputValue('');
-    setSelectedFile(null);
-    setAudioUrl(null);
-    setAudioBlob(null);
-    setUploadedFileInfo(null);
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
-    
     // Prepare form data for API call
     const formData = new FormData();
     formData.append('history', JSON.stringify(messages.map(msg => ({
@@ -1116,19 +1119,19 @@ export default function ChatPage() {
     formData.append('message', apiMessageContent);
     
     // Add file data if we have it
-    if (uploadedFileInfo) {
-      formData.append('base64', uploadedFileInfo.base64);
-      formData.append('convertedType', uploadedFileInfo.convertedType);
-      formData.append('originalType', uploadedFileInfo.originalType);
-      formData.append('fileName', uploadedFileInfo.name);
-    } else if (audioBlob && hasAudio) {
+    if (currentUploadedFileInfo) {
+      formData.append('base64', currentUploadedFileInfo.base64);
+      formData.append('convertedType', currentUploadedFileInfo.convertedType);
+      formData.append('originalType', currentUploadedFileInfo.originalType);
+      formData.append('fileName', currentUploadedFileInfo.name);
+    } else if (currentAudioBlob && currentAudioUrl) { // Check both currentAudioBlob and currentAudioUrl
       // Directly append the audio blob
-      const audioFile = new File([audioBlob], `recording-${Date.now()}.webm`, { type: 'audio/webm' });
+      const audioFile = new File([currentAudioBlob], `recording-${Date.now()}.webm`, { type: 'audio/webm' });
       formData.append('audio', audioFile);
       console.log("Added audio blob to form data:", audioFile.size, "bytes");
-    } else if (selectedFile) {
+    } else if (currentSelectedFile) {
       // For other files like images
-      formData.append('file', selectedFile);
+      formData.append('file', currentSelectedFile);
     }
     
     // Log form data for debugging
@@ -1266,7 +1269,16 @@ export default function ChatPage() {
     } catch (err: unknown) {
         if (err instanceof Error) {
             console.error("Fetch error:", err.message);
-            setError(`Failed to get response: ${err.message}`);
+            
+            // More detailed error handling
+            if (err.message.includes("not valid JSON")) {
+                console.error("JSON parsing error. Server might be returning HTML instead of JSON.", err);
+                setError("Server returned an invalid response. Please check if your API keys are correctly set in .env.local");
+            } else if (err.message.includes("Failed to fetch") || err.message.includes("NetworkError")) {
+                setError("Network error. Please check your connection and try again.");
+            } else {
+                setError(`Failed to get response: ${err.message}`);
+            }
         } else {
             console.error("An unknown error occurred:", err);
             setError('An unknown error occurred. Please try again.');
@@ -1281,12 +1293,13 @@ export default function ChatPage() {
   // Define model capabilities
   const modelCapabilities: Record<string, { hasAttachment?: boolean; hasMic?: boolean }> = {
     'gemini-2.0-flash': { hasAttachment: true, hasMic: true },
+    'gpt-4o-mini': { hasAttachment: true, hasMic: false },
     'meta-llama/Llama-Vision-Free': { hasAttachment: true, hasMic: false },
     'black-forest-labs/FLUX.1-schnell-Free': { hasAttachment: false, hasMic: false },
     'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free': { hasAttachment: false, hasMic: false },
-    'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free': { hasAttachment: false, hasMic: false },
+    'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free': { hasAttachment: false, hasMic: false }, // Corrected MhasMic to hasMic
     'qwen/qwen2.5-vl-72b-instruct:free': { hasAttachment: true, hasMic: false },
-    'microsoft/phi-4-reasoning-plus:free': { hasAttachment: false, hasMic: false },
+    // Removed microsoft/phi-4-reasoning-plus:free capability
     'sonar': { hasAttachment: false, hasMic: false },
     'sonar-pro': { hasAttachment: false, hasMic: false },
   };

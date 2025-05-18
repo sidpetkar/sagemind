@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { GeminiService } from '@/lib/llm/gemini'; // Using path alias '@'
 import { PerplexityService } from '@/lib/llm/perplexity'; // Import the Perplexity service
 import { OpenRouterService } from '@/lib/llm/openrouter'; // Import the OpenRouter service
+import { OpenAIService } from '@/lib/llm/openai'; // Import the OpenAI service
 import { ChatMessage, FileData, FileUri, LlmService } from '@/lib/llm/interface'; // Import LlmService
 import Together from 'together-ai'; // Added for Llama Vision
 
@@ -25,6 +26,7 @@ interface FrontendMessage {
 const geminiService = new GeminiService();
 const perplexityService = new PerplexityService();
 const openRouterService = new OpenRouterService();
+const openAIService = new OpenAIService();
 // Explicitly set API key from environment variable
 const together = new Together({ 
   apiKey: process.env.TOGETHER_API_KEY 
@@ -40,13 +42,33 @@ if (!process.env.OPENROUTER_API_KEY) {
   console.warn("OPENROUTER_API_KEY is not set. OpenRouter models will not be available.");
 }
 
+// Check for OpenAI API Key and provide detailed logging
+console.log("API Keys availability check:", {
+  OPENAI_API_KEY_SET: !!process.env.OPENAI_API_KEY,
+  GEMINI_API_KEY_SET: !!process.env.GEMINI_API_KEY,
+  PERPLEXITY_API_KEY_SET: !!process.env.PERPLEXITY_API_KEY,
+  TOGETHER_API_KEY_SET: !!process.env.TOGETHER_API_KEY,
+  OPENROUTER_API_KEY_SET: !!process.env.OPENROUTER_API_KEY,
+  NODE_ENV: process.env.NODE_ENV
+});
+
+if (!process.env.OPENAI_API_KEY) {
+  console.warn("OPENAI_API_KEY is not set. OpenAI models will not be available.");
+  if (process.env.NODE_ENV === 'development') {
+    console.warn("Using fallback key for development from openai.ts file.");
+  }
+}
+
 // Helper function to select the appropriate service based on model name
 function getServiceForModel(modelName: string): LlmService {
   if (modelName.startsWith('sonar')) {
     return perplexityService;
   }
-  if (modelName === 'qwen/qwen2.5-vl-72b-instruct:free' || modelName === 'microsoft/phi-4-reasoning-plus:free') {
+  if (modelName === 'qwen/qwen2.5-vl-72b-instruct:free') {
     return openRouterService;
+  }
+  if (modelName === 'gpt-4o-mini') {
+    return openAIService;
   }
   return geminiService; // Default to Gemini
 }
@@ -317,13 +339,8 @@ export async function POST(request: Request) {
     // Ensure audio requests have a text message
     let processedMessage = message;
     if (isAudioRequest && (!processedMessage || processedMessage.trim() === '')) {
-      processedMessage = "Please transcribe and respond to this audio.";
-      console.log("Added default text message for audio-only request");
-    }
-
-    // Require at least a message, a file, or a fileUri
-    if (!processedMessage && !file && !fileUriString && !base64String) {
-      return NextResponse.json({ error: 'Message, file, or file URI is required' }, { status: 400 });
+      processedMessage = "Process this audio."; // Changed to a more neutral default
+      console.log("Set neutral default text message for audio-only request in API route");
     }
 
     // --- Process History ---
@@ -386,16 +403,16 @@ export async function POST(request: Request) {
           throw new Error("File buffer is empty after reading");
         }
         
-        const base64String = Buffer.from(fileBuffer).toString('base64');
-        console.log(`Converted direct file ${file.name} to base64 (length: ${base64String.length})`);
+        const base64StringFromFile = Buffer.from(fileBuffer).toString('base64'); // Renamed to avoid conflict
+        console.log(`Converted direct file ${file.name} to base64 (length: ${base64StringFromFile.length})`);
         
-        if (base64String.length < 5) {
+        if (base64StringFromFile.length < 5) {
           throw new Error("Generated base64 string is invalid or too short");
         }
         
         fileData = {
           mimeType: file.type,
-          base64String: base64String
+          base64String: base64StringFromFile
         };
       } catch (fileError) {
           console.error("Error processing file:", fileError);
@@ -435,6 +452,11 @@ export async function POST(request: Request) {
       };
     }
 
+    // Require at least a message, fileData, or a fileUri
+    if (!processedMessage && !fileData && !fileUriString) {
+      return NextResponse.json({ error: 'Message, file, or file URI is required' }, { status: 400 });
+    }
+
     // --- Handle Llama Vision Model --- 
     if (modelName === 'meta-llama/Llama-Vision-Free') {
       if (!process.env.TOGETHER_API_KEY) {
@@ -471,8 +493,7 @@ export async function POST(request: Request) {
       }
     }
     // --- Handle OpenRouter Models ---
-    else if (modelName === 'qwen/qwen2.5-vl-72b-instruct:free' || 
-             modelName === 'microsoft/phi-4-reasoning-plus:free') {
+    else if (modelName === 'qwen/qwen2.5-vl-72b-instruct:free') {
       if (!process.env.OPENROUTER_API_KEY) {
         return NextResponse.json({ error: 'OPENROUTER_API_KEY is not set. OpenRouter models are not available.' }, { status: 503 });
       }

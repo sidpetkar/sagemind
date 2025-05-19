@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown';
 // Import next/image
 import Image from 'next/image'; 
 // Import Lucide React icons
-import { Paperclip, Mic, Square, X, Send, ArrowUp, History, Plus, Trash2, LogIn, LogOut, PlusCircle, MessageCirclePlus, Sun, Moon } from 'lucide-react';
+import { Paperclip, Mic, Square, X, Send, ArrowUp, History, Plus, Trash2, LogIn, LogOut, PlusCircle, MessageCirclePlus, Sun, Moon, Youtube } from 'lucide-react';
 // Import markdown extensions
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -45,6 +45,10 @@ import { useTheme } from '../contexts/ThemeContext'; // Import useTheme
 // Import image storage utilities
 import { storeImageToFirebase, getImageFromStorage } from '../lib/imageStorage';
 
+// Import YouTube video type
+import { YouTubeVideo } from '../lib/youtube'; // Added import for YouTubeVideo type
+import { ChatMessage } from '../lib/llm/interface'; // Added import for ChatMessage type
+
 interface Message {
   role: 'user' | 'ai';
   content: string;
@@ -59,6 +63,7 @@ interface Message {
   webSearchQueries?: string[]; // For Google Search grounded queries
   renderedContent?: string; // For Google Search rendered suggestions
   sourceCitations?: string[]; // Array of source URLs for citations
+  youtubeVideos?: YouTubeVideo[]; // Added for YouTube search results
 }
 
 interface ChatThread {
@@ -104,6 +109,89 @@ const processCitationMarkers = (text: string, citations?: string[]): React.React
   });
 };
 
+// New Component for YouTube Video Carousel
+const YouTubeCarousel: React.FC<{ videos: YouTubeVideo[] }> = ({ videos }) => {
+  if (!videos || videos.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-3 mb-2 overflow-x-auto">
+      <div className="flex space-x-3 p-1 no-scrollbar thin-scrollbar">
+        {videos.map((video) => (
+          <a
+            key={video.id}
+            href={`https://www.youtube.com/watch?v=${video.videoId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex-shrink-0 w-[280px] bg-white dark:bg-gray-800 rounded-3xl /* Point 4: Card Roundness */ overflow-hidden no-underline group transition-opacity hover:opacity-90"
+          >
+            <div className="relative w-full aspect-video"> 
+              <Image
+                src={video.thumbnailUrl}
+                alt={video.title}
+                layout="fill"
+                objectFit="cover"
+                className="rounded-t-3xl /* Point 4: Thumbnail Roundness */"
+              />
+              {video.duration && (
+                <div className="absolute bottom-1.5 right-1.5 bg-black bg-opacity-75 text-white text-xs px-1.5 py-0.5 rounded">
+                  {video.duration}
+                </div>
+              )}
+            </div>
+            <div className="p-2.5">
+              {/* Point 2: Card title - Using conditional class for color control */}
+              <h3 
+                className="text-sm font-medium liderazgo-ellipsis-2-lines mb-1 transition-colors text-[#161515] dark:text-gray-100" // Use a light gray for dark mode for better aesthetics
+                title={video.title}
+              >
+                {video.title}
+              </h3>
+              <p className="text-xs text-gray-600 dark:text-gray-400 truncate mb-0.5" title={video.channelTitle}>
+                {video.channelTitle}
+              </p>
+              {(video.viewCount || video.publishedAt) && (
+                <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
+                  {video.viewCount}{video.viewCount && video.publishedAt ? ' • ' : ''}{video.publishedAt}
+                </p>
+              )}
+            </div>
+          </a>
+        ))}
+      </div>
+      <style jsx>{`
+        .no-scrollbar::-webkit-scrollbar {
+          display: none;
+        }
+        .no-scrollbar {
+          -ms-overflow-style: none;  /* IE and Edge */
+          scrollbar-width: none;  /* Firefox */
+        }
+        .thin-scrollbar::-webkit-scrollbar {
+          height: 6px; /* Point 3: Sleeker scrollbar */
+        }
+        .thin-scrollbar::-webkit-scrollbar-thumb {
+          background-color: #cbd5e0; /* Tailwind gray-400 */
+          border-radius: 3px;
+        }
+        .dark .thin-scrollbar::-webkit-scrollbar-thumb {
+          background-color: #4a5568; /* Tailwind gray-600 for dark mode */
+        }
+        .liderazgo-ellipsis-2-lines {
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          line-height: 1.4em; 
+          max-height: 2.8em; 
+        }
+      `}</style>
+    </div>
+  );
+};
+
 export default function ChatPage() {
   const { currentUser, authLoading } = useAuth(); // Use the auth context
   const { theme, toggleTheme } = useTheme(); // Use the theme context
@@ -116,6 +204,9 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null); // Ref for textarea
   const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false); // State for drag-over visual cue
+
+  // --- YouTube Mode State ---
+  const [isYouTubeModeActive, setIsYouTubeModeActive] = useState<boolean>(false);
 
   // --- Model Selection State ---
   const [selectedModel, setSelectedModel] = useState<string>('gpt-4o-mini'); // Default model changed
@@ -151,11 +242,21 @@ export default function ChatPage() {
   const programmaticScrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const userScrollInactivityTimerRef = useRef<NodeJS.Timeout | null>(null); // Timer for user scroll inactivity
 
+  // Function to scroll to the bottom of the chat messages
+  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior, block: 'end' });
+    }
+  };
+
   // State for managing auto-scroll behavior
   const [isAutoScrollingPaused, setIsAutoScrollingPaused] = useState<boolean>(false);
 
   // --- Guest Mode State ---
   const [isGuestMode, setIsGuestMode] = useState<boolean>(false);
+
+  // --- UI Interaction State ---
+  const [showScrollButton, setShowScrollButton] = useState<boolean>(false);
 
   // --- Chat History State ---
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
@@ -177,8 +278,6 @@ export default function ChatPage() {
      if (firstAIMessage) {
       return `${firstAIMessage.content.trim().split(' ').slice(0, 5).join(' ')}...`;
     }
-    // Fallback for chats that might somehow have no text messages but aren't 'New Chat' yet
-    // Or if a title couldn't be generated from message content for some reason.
     return `Chat started ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
   };
 
@@ -191,6 +290,22 @@ export default function ChatPage() {
     return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) +
            ' ' +
            date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  };
+
+  const toggleYouTubeMode = () => {
+    // Toggle the YouTube mode by setting the opposite of current state
+    const newYouTubeMode = !isYouTubeModeActive;
+    console.log(`Toggling YouTube mode from ${isYouTubeModeActive} to ${newYouTubeMode}`);
+    
+    setIsYouTubeModeActive(newYouTubeMode);
+    
+    // If turning ON YouTube mode, clear any file/audio uploads
+    if (newYouTubeMode) {
+      setSelectedFile(null);
+      setUploadedFileInfo(null);
+      setAudioBlob(null);
+      setAudioUrl(null);
+    }
   };
 
   // --- Firestore Functions ---
@@ -938,6 +1053,39 @@ export default function ChatPage() {
   };
   // --- End Image Overlay Handlers ---
 
+  // Helper to update or add the AI message for streaming models
+  const updateAiMessage = (chunkData: Partial<Message & { text?: string, completeContent?: string }>) => {
+    setMessages(prevMessages => {
+      const lastMessage = prevMessages[prevMessages.length - 1];
+      // Ensure we are updating an AI message and it's not a YouTube video placeholder
+      if (lastMessage && lastMessage.role === 'ai' && !chunkData.youtubeVideos) {
+        // Update existing AI message
+        return prevMessages.map((msg, index) =>
+          index === prevMessages.length - 1
+            ? { 
+                ...msg, 
+                ...chunkData,
+                content: chunkData.completeContent !== undefined 
+                  ? chunkData.completeContent 
+                  : (msg.content || '') + (chunkData.text || ''),
+                text: undefined, 
+                completeContent: undefined 
+              }
+            : msg
+        );
+      } else {
+        // Add new AI message if no suitable AI message to update or if it's a new type (e.g. YouTube videos)
+        return [...prevMessages, { 
+          role: 'ai',
+          content: chunkData.completeContent || chunkData.text || '',
+          ...chunkData,
+          text: undefined, 
+          completeContent: undefined 
+        }];
+      }
+    });
+  };
+
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1007,286 +1155,203 @@ export default function ChatPage() {
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    
-    if (!inputValue.trim() && !selectedFile && !audioUrl && !uploadedFileInfo) {
-      setError('Please enter a message or select a file.');
-      return;
-    }
+    if (!inputValue.trim() && !selectedFile && !audioBlob) return;
 
-    // Capture current values before clearing
-    const userInput = inputValue.trim();
+    setError(null);
+    const currentInput = inputValue.trim();
     const currentSelectedFile = selectedFile;
-    const currentAudioBlob = audioBlob;
-    const currentAudioUrl = audioUrl;
-    const currentUploadedFileInfo = uploadedFileInfo;
-    
-    // Reset inputs IMMEDIATELY to improve UI responsiveness
+    const currentAudioBlob = audioBlob; // Capture current audio blob
+    const currentUploadedFileInfo = uploadedFileInfo; // Capture current file info
+    const currentFileName = currentSelectedFile?.name || uploadedFileInfo?.name || (currentAudioBlob ? 'audio_recording.webm' : undefined);
+    const currentFileType = currentSelectedFile?.type || uploadedFileInfo?.originalType || (currentAudioBlob ? currentAudioBlob.type : undefined);
+
+    // Create user message object
+    const userMessage: Message = {
+      role: 'user',
+      content: currentInput,
+      // Include file/audio info if present
+      ...(currentUploadedFileInfo && { fileType: currentUploadedFileInfo.convertedType, fileName: currentUploadedFileInfo.name, imageBase64Preview: currentUploadedFileInfo.convertedType.startsWith('image/') ? currentUploadedFileInfo.base64 : undefined }),
+      ...(currentAudioBlob && { audioUrl: URL.createObjectURL(currentAudioBlob), fileType: currentAudioBlob.type, fileName: 'audio_recording.webm' }),
+    };
+    setMessages(prev => [...prev, userMessage]);
+
+    // Clear inputs after capturing them
     setInputValue('');
     setSelectedFile(null);
-    setAudioUrl(null);
     setAudioBlob(null);
+    setAudioUrl(null);
     setUploadedFileInfo(null);
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
-    
-    // Ensure we have a valid chat ID
-    let activeChatId = currentChatId;
-    if (!activeChatId) {
-      try {
-        // Create a new chat in Firestore
-        const newChatRef = await addDoc(collection(db, 'chatThreads'), {
-          title: 'New Chat',
-          messages: [],
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-          userId: currentUser?.uid // Associate with user if logged in
-        });
-        activeChatId = newChatRef.id;
-        setCurrentChatId(newChatRef.id);
-        localStorage.setItem('currentChatId', newChatRef.id);
-        console.log("Created new chat with ID:", newChatRef.id);
-      } catch (err) {
-        console.error("Error creating new chat:", err);
-        setError("Failed to create chat session");
-        return;
-      }
-    }
-    
-    // Show loading state
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (textareaRef.current) textareaRef.current.focus();
+
     setIsLoading(true);
-    setError(null);
-    
-    // Determine message content - for Gemini audio, use empty string in UI but a placeholder for API
-    const userMessageContent = userInput;
-    let apiMessageContent = userInput;
-    
-    // For Gemini audio-only messages, we need a placeholder in the API
-    if (!userInput && currentAudioBlob && selectedModel.startsWith('gemini')) {
-      apiMessageContent = "Please transcribe and respond to this audio.";
-      console.log(`Audio-only for Gemini: Empty user message, API gets: "${apiMessageContent}"`);
-    }
-    
-    // Add user message to UI state
-    const newUserMessage: Message = {
-      role: 'user',
-      content: userMessageContent, // Empty for audio-only
-      ...(currentAudioUrl && {
-        audioUrl: currentAudioUrl, // Use captured value
-        fileType: 'audio/webm', // Assuming webm, adjust if dynamic
-        fileName: `recording-${Date.now()}.webm`,
-      }),
-      ...(currentUploadedFileInfo && currentUploadedFileInfo.originalType.startsWith('image/') && {
-        imageBase64Preview: currentUploadedFileInfo.base64,
-        fileType: currentUploadedFileInfo.originalType
-      })
-    };
-    
-    // Add user message to messages state
-    setMessages(prev => [...prev, newUserMessage]);
-    
-    // Save to Firestore
-    try {
-      const chatDocRef = doc(db, 'chatThreads', activeChatId);
-      await setDoc(chatDocRef, {
-        updatedAt: serverTimestamp(),
-        messages: [...messages, newUserMessage].map(msg => ({
-          role: msg.role,
-          content: msg.content,
-          ...(msg.audioUrl && { audioUrl: msg.audioUrl }),
-          ...(msg.fileType && { fileType: msg.fileType }),
-          ...(msg.fileName && { fileName: msg.fileName }),
-          ...(msg.imageBase64Preview && { imageBase64Preview: msg.imageBase64Preview })
-        }))
-      }, { merge: true });
-    } catch (err) {
-      console.error("Error saving message to Firestore:", err);
-      // Continue anyway - the message is in the UI
-    }
-    
-    // Add AI placeholder message
-    const aiPlaceholder: Message = { role: 'ai', content: '' };
-    setMessages(prev => [...prev, aiPlaceholder]);
-    const aiMessageIndex = messages.length + 1; // Current messages plus the user message we just added
-    
-    // Prepare form data for API call
-    const formData = new FormData();
-    formData.append('history', JSON.stringify(messages.map(msg => ({
-      role: msg.role === 'ai' ? 'model' : 'user',
-      content: msg.content
-    }))));
-    formData.append('modelName', selectedModel);
-    formData.append('message', apiMessageContent);
-    
-    // Add file data if we have it
-    if (currentUploadedFileInfo) {
-      formData.append('base64', currentUploadedFileInfo.base64);
-      formData.append('convertedType', currentUploadedFileInfo.convertedType);
-      formData.append('originalType', currentUploadedFileInfo.originalType);
-      formData.append('fileName', currentUploadedFileInfo.name);
-    } else if (currentAudioBlob && currentAudioUrl) { // Check both currentAudioBlob and currentAudioUrl
-      // Directly append the audio blob
-      const audioFile = new File([currentAudioBlob], `recording-${Date.now()}.webm`, { type: 'audio/webm' });
-      formData.append('audio', audioFile);
-      console.log("Added audio blob to form data:", audioFile.size, "bytes");
-    } else if (currentSelectedFile) {
-      // For other files like images
-      formData.append('file', currentSelectedFile);
-    }
-    
-    // Log form data for debugging
-    console.log("Form data keys:", Array.from(formData.keys()));
 
     try {
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json(); // Assuming error response is JSON
-        throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
-      }
-
-      // Check if the selected model is FLUX image generation model
-      if (selectedModel === 'black-forest-labs/FLUX.1-schnell-Free') {
-        // For FLUX, the response is not streamed - it's a direct JSON response
-        const payload = await response.json();
+      if (isYouTubeModeActive) {
+        // Handle YouTube Search
+        const chatContextForYouTube = messages.slice(-5).map(msg => msg.content); // Get last 5 messages for context
         
-        if (payload.error) {
-          throw new Error(payload.error.message || payload.error);
-        }
-        
-        // Update the AI message with the generated image
-        setMessages((prevMessages) => {
-          const updatedMessages = [...prevMessages];
-          if (updatedMessages[aiMessageIndex]) {
-            updatedMessages[aiMessageIndex] = {
-              role: 'ai',
-              content: payload.text || `Image generated for: "${userInput}"`,
-              imageBase64: payload.imageBase64
-            };
-          }
-          return updatedMessages;
+        const response = await fetch('/api/youtube', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: currentInput, chatContext: chatContextForYouTube, maxResults: 10 }),
         });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to fetch YouTube videos');
+        }
+    
+        const videos: YouTubeVideo[] = await response.json();
+
+        const aiYouTubeMessage: Message = {
+          role: 'ai',
+          content: videos.length > 0 ? `Found ${videos.length} videos for "${currentInput}":` : `No YouTube videos found for "${currentInput}".`,
+          youtubeVideos: videos,
+        };
+        // Update messages state first
+        const updatedMessagesWithYT = [...messages, userMessage, aiYouTubeMessage];
+        setMessages(updatedMessagesWithYT);
+        await saveCurrentChat(updatedMessagesWithYT); // Save chat with YouTube results using the constructed array
+
+      } else {
+        // Handle LLM interaction
+        const history = messages.slice(0, messages.length).map(msg => ({
+          role: msg.role === 'ai' ? 'model' : 'user',
+          content: msg.content,
+          ...(msg.fileType && msg.fileName && msg.imageBase64Preview && msg.imageBase64Preview.includes(',') && { 
+            fileData: { 
+              mimeType: msg.fileType, 
+              base64String: msg.imageBase64Preview.split(',')[1] 
+            } 
+          }),
+        })) as ChatMessage[];
         
-        setIsLoading(false);
-        return; // Early return since we've handled the response
-      }
+        const formData = new FormData();
+        if (currentInput) formData.append('message', currentInput);
+        formData.append('history', JSON.stringify(history));
+        formData.append('modelName', selectedModel);
+        
+        if (currentUploadedFileInfo) {
+          formData.append('base64', currentUploadedFileInfo.base64);
+          formData.append('convertedType', currentUploadedFileInfo.convertedType);
+          formData.append('fileName', currentUploadedFileInfo.name);
+        } else if (currentAudioBlob) {
+          const audioFile = new File([currentAudioBlob], 'audio_recording.webm', { type: currentAudioBlob.type });
+          formData.append('audio', audioFile);
+        }
+        
+        console.log("Sending to /api/chat with FormData. Keys:", Array.from(formData.keys()));
+        
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          body: formData,
+        });
 
-      // --- Handle Streaming Response --- 
-      if (!response.body) {
-        throw new Error("Response body is missing");
-      }
+        if (!response.ok) {
+          let errorResponseMessage = 'Network response was not ok.';
+          try {
+            const errorData = await response.json();
+            errorResponseMessage = errorData.error || errorResponseMessage;
+          } catch (jsonParseError) {
+            errorResponseMessage = response.statusText || errorResponseMessage;
+            console.error("Failed to parse error response as JSON, using status text:", jsonParseError);
+          }
+          throw new Error(errorResponseMessage);
+        }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let done = false;
-      let accumulatedResponse = '';
-      let currentWebSearchQueries: string[] | undefined = undefined;
-      let currentRenderedContent: string | undefined = undefined;
-      let currentSourceCitations: string[] | undefined = undefined;
+        // ---- HANDLE FLUX (Non-Streamed JSON) vs. Other (Streamed) Models ----
+        if (selectedModel === 'black-forest-labs/FLUX.1-schnell-Free') {
+          // FLUX returns a single JSON object, not a stream
+          const fluxPayload = await response.json();
+          const aiFluxMessage: Message = {
+            role: 'ai',
+            content: fluxPayload.text || '',
+            imageBase64: fluxPayload.imageBase64,
+          };
+          // Update messages state first
+          const updatedMessagesWithFlux = [...messages, userMessage, aiFluxMessage];
+          setMessages(updatedMessagesWithFlux);
+          await saveCurrentChat(updatedMessagesWithFlux); // Save chat with FLUX result using the constructed array
+        } else {
+          // Handle streamed response for other models
+          if (!response.body) {
+            throw new Error("Response body is null for a streaming model.");
+          }
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let accumulatedText = "";
+          let webSearchQueries: string[] | undefined = undefined;
+          let renderedContent: string | undefined = undefined;
+          let sourceCitations: string[] | undefined = undefined;
+          // Note: FLUX imageBase64 is handled above, so it won't be processed here.
 
-      while (!done) {
-        const { value, done: streamDone } = await reader.read();
-        done = streamDone;
-        if (value) {
-          const rawJsonStrings = decoder.decode(value, { stream: true });
-          // Split by newline in case multiple JSON objects are received in one chunk
-          const jsonObjectsAsString = rawJsonStrings.split('\n').filter(s => s.trim() !== '');
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            const chunkString = decoder.decode(value, { stream: true });
+            console.log("Received chunk:", chunkString); 
+            
+            const jsonObjects = chunkString.split('\n').filter(line => line.trim().startsWith('{') && line.trim().endsWith('}'));
 
-          for (const jsonObjStr of jsonObjectsAsString) {
-            try {
-              const payload = JSON.parse(jsonObjStr);
+            if (jsonObjects && jsonObjects.length > 0) {
+              jsonObjects.forEach(objStr => {
+                try {
+                  const parsedChunk = JSON.parse(objStr.trim()) as {text?: string, webSearchQueries?: string[], renderedContent?: string, sourceCitations?: string[] /* imageBase64 removed here */ };
+                  
+                  if (parsedChunk.text) {
+                    accumulatedText += parsedChunk.text;
+                    console.log("Accumulated text now:", accumulatedText.length, "chars"); 
+                  }
+                  if (parsedChunk.webSearchQueries) webSearchQueries = parsedChunk.webSearchQueries;
+                  if (parsedChunk.renderedContent) renderedContent = parsedChunk.renderedContent;
+                  if (parsedChunk.sourceCitations) sourceCitations = parsedChunk.sourceCitations;
 
-              if (payload.text) {
-                // Handle initial text content that might be oddly formatted
-                if (accumulatedResponse === '' && payload.text.trim() !== '') {
-                  // For first chunk, ensure we don't have leading whitespace issues
-                  const cleanedText = payload.text.trimStart();
-                  accumulatedResponse = cleanedText;
-                } else {
-                  accumulatedResponse += payload.text;
+                  updateAiMessage({
+                    completeContent: accumulatedText, 
+                    webSearchQueries: webSearchQueries,
+                    renderedContent: renderedContent,
+                    sourceCitations: sourceCitations,
+                  });
+                } catch (e) {
+                  console.error("Failed to parse chunk:", objStr, e);
+                  if (typeof objStr === 'string' && objStr.includes('"text"')) {
+                    const textMatch = objStr.match(/"text":"(.*?)"/);
+                    if (textMatch && textMatch[1]) {
+                      let recoveredText = textMatch[1];
+                      try { recoveredText = JSON.parse('"' + recoveredText + '"'); }
+                      catch (sanitizeError) { console.warn("Could not fully sanitize recovered text:", recoveredText, sanitizeError); }
+                      accumulatedText += recoveredText;
+                      updateAiMessage({ completeContent: accumulatedText });
+                    }
+                  }
                 }
-              }
-              
-              if (payload.webSearchQueries) {
-                currentWebSearchQueries = payload.webSearchQueries;
-              }
-              if (payload.renderedContent) {
-                currentRenderedContent = payload.renderedContent;
-              }
-              if (payload.sourceCitations) {
-                currentSourceCitations = payload.sourceCitations;
-              }
-
-              // Update the content of the placeholder AI message
-              setMessages((prevMessages) => {
-                const updatedMessages = [...prevMessages];
-                if(updatedMessages[aiMessageIndex]) {
-                    updatedMessages[aiMessageIndex] = {
-                        ...updatedMessages[aiMessageIndex],
-                        content: accumulatedResponse,
-                        webSearchQueries: currentWebSearchQueries || updatedMessages[aiMessageIndex].webSearchQueries,
-                        renderedContent: currentRenderedContent || updatedMessages[aiMessageIndex].renderedContent,
-                        sourceCitations: currentSourceCitations || updatedMessages[aiMessageIndex].sourceCitations,
-                    };
-                }
-                return updatedMessages;
               });
-            } catch (parseError) {
-              console.error("Error parsing JSON chunk from stream:", parseError, "Chunk:", jsonObjStr);
-              // Handle partial JSON if necessary, or buffer it.
-              // For simplicity here, we log and skip. A robust solution might buffer incomplete lines.
             }
           }
-        }
-      }
-      // --- End Streaming Handling ---
-
-      // This section for image handling might need adjustment if image data comes differently now
-      if (accumulatedResponse.startsWith("data:image") || accumulatedResponse.includes("<img src=")) { // crude check
-           setMessages(prevMessages => prevMessages.map((msg, i) => {
-              if (i === aiMessageIndex) {
-                  let imageUrl = accumulatedResponse;
-                  if (accumulatedResponse.includes("<img src=")) { // very basic parsing
-                      const match = accumulatedResponse.match(/<img src="([^"]*)"/);
-                      if (match && match[1]) imageUrl = match[1];
-                      else imageUrl = ""; // Could not parse, clear it or show error
-                  }
-                  // Use the message from prevMessages at aiMessageIndex as the base
-                  const baseAiMessage = prevMessages[aiMessageIndex]; 
-                  return { 
-                    ...baseAiMessage, 
-                    content: imageUrl ? "" : "Image response (see image).", 
-                    imageUrl: imageUrl 
-                  };
-              }
-              return msg;
-          }));
-      }
-
-    } catch (err: unknown) {
-        if (err instanceof Error) {
-            console.error("Fetch error:", err.message);
-            
-            // More detailed error handling
-            if (err.message.includes("not valid JSON")) {
-                console.error("JSON parsing error. Server might be returning HTML instead of JSON.", err);
-                setError("Server returned an invalid response. Please check if your API keys are correctly set in .env.local");
-            } else if (err.message.includes("Failed to fetch") || err.message.includes("NetworkError")) {
-                setError("Network error. Please check your connection and try again.");
-            } else {
-                setError(`Failed to get response: ${err.message}`);
+          setMessages(prevMsgs => {
+            const finalUserMessage = prevMsgs[prevMsgs.length - 2]; 
+            const finalAiMessage = prevMsgs[prevMsgs.length - 1]; 
+            if (finalUserMessage && finalUserMessage.role === 'user' && finalAiMessage && finalAiMessage.role === 'ai'){
+                saveCurrentChat(prevMsgs); 
             }
-        } else {
-            console.error("An unknown error occurred:", err);
-            setError('An unknown error occurred. Please try again.');
+            return prevMsgs;
+          });
         }
-        // Remove the AI placeholder message if an error occurred during streaming
-        setMessages(prev => prev.slice(0, -1));
+      }
+    } catch (err: any) {
+      console.error("Error in handleSubmit:", err);
+      setError(err.message || 'An error occurred while fetching the response.');
+      // Add an error message to the chat
+      setMessages(prev => [...prev, { role: 'ai', content: `Error: ${err.message || 'Something went wrong.'}` }]);
     } finally {
       setIsLoading(false);
+      // Auto-scroll to bottom after response is fully processed or on error
+      // Ensure this only happens if user hasn't manually scrolled up
+      if (!isAutoScrollingPaused) {
+        scrollToBottom();
+      }
     }
   };
 
@@ -1736,6 +1801,22 @@ export default function ChatPage() {
                           />
                         </div>
                       )}
+                      {/* Display YouTube Carousel if videos are present */}
+                      {msg.youtubeVideos && msg.youtubeVideos.length > 0 && (
+                        <YouTubeCarousel videos={msg.youtubeVideos} />
+                      )}
+
+                      {/* Display AI generated image if present (FLUX) */}
+                      {msg.imageBase64 && (
+                        <div className="mt-2">
+                          <img
+                            src={`data:image/jpeg;base64,${msg.imageBase64}`}
+                            alt="Generated by AI"
+                            className="max-w-full md:max-w-md h-auto rounded-2xl cursor-pointer hover:opacity-80 transition-opacity dark:shadow-none"
+                            onClick={() => handleOpenImageOverlay(`data:image/jpeg;base64,${msg.imageBase64}`)}
+                          />
+                        </div>
+                      )}
                     </>
                   ) : (
                     <div className="flex flex-col">
@@ -1915,16 +1996,17 @@ export default function ChatPage() {
                 />
               </div>
 
-              {/* Bottom Bar: Dropdown & Buttons */}
+              {/* Bottom Bar: YouTube Toggle, Dropdown & Buttons */}
               <div className="flex justify-between items-center pt-2">
+                <div className="flex items-center gap-2"> {/* Left side group for Model Dropdown & YouTube Toggle */}
                 {/* Custom Model Dropdown with squircle styling */}
                 <div className="relative" ref={modelDropdownRef}>
                   <button
                     onClick={handleModelDropdownToggle}
                     disabled={isLoading}
-                    className="flex items-center justify-between border text-xs cursor-pointer py-1.5 pl-2 pr-1.5 model-dropdown-toggle"
+                      className={`flex items-center justify-between border text-xs cursor-pointer py-1.5 pl-2 pr-1.5 model-dropdown-toggle bg-gray-100 hover:bg-gray-200 dark:bg-[#1E1E1E] dark:hover:bg-gray-700 border-gray-300 dark:border-[#2F2F2E] text-gray-700 dark:text-[#C8C8C8] focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-600 focus:ring-offset-1 dark:focus:ring-offset-gray-900`}
                     style={{ borderRadius: '12px', width: '140px' }}
-                    title="Select AI Model"
+                      title={"Select AI Model"}
                   >
                     <span className="truncate">{currentModelLabel}</span>
                     <svg className={`ml-1 h-3 w-3 transform transition-transform ${isModelDropdownOpen ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
@@ -1932,17 +2014,16 @@ export default function ChatPage() {
                     </svg>
                   </button>
                   
-                  {/* Dropdown Menu - Modified to open upward */}
                   {isModelDropdownOpen && (
                     <div 
-                      className="absolute left-0 bottom-full mb-1 w-full border shadow-sm z-20 overflow-hidden model-dropdown visible"
+                        className="absolute left-0 bottom-full mb-1 w-full border shadow-sm z-20 overflow-hidden model-dropdown visible bg-white dark:bg-[#1E1E1E]"
                       style={{ borderRadius: '12px' }}
                     >
                       <div className="max-h-56 overflow-y-auto py-1">
                         {modelOptions.map((option) => (
                           <button
                             key={option.value}
-                            className={`w-full text-left px-3 py-2 text-xs focus:outline-none transition-colors model-dropdown-item ${selectedModel === option.value ? 'selected' : ''}`}
+                              className={`w-full text-left px-3 py-2 text-xs focus:outline-none transition-colors model-dropdown-item ${selectedModel === option.value ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-50 dark:hover:bg-gray-600'} text-gray-900 dark:text-white`}
                             onClick={(e) => {
                               e.stopPropagation();
                               setSelectedModel(option.value);
@@ -1956,6 +2037,30 @@ export default function ChatPage() {
                       </div>
                     </div>
                   )}
+                  </div>
+
+                  {/* Point 1: YouTube Toggle Button - Re-added and Styled */}
+                  <button
+                    type="button"
+                    onClick={toggleYouTubeMode}
+                    disabled={isLoading}
+                    className={`flex items-center justify-center text-xs cursor-pointer py-1.5 px-3 transition-colors
+                      ${isYouTubeModeActive ? 'yt-active' : 'yt-default'}`}
+                    style={{
+                      borderRadius: '12px',
+                      minWidth: '60px',
+                    }}
+                    title={isYouTubeModeActive ? "Switch to AI Chat" : "Switch to YouTube Search"}
+                    aria-label={isYouTubeModeActive ? "Switch to AI Chat" : "Switch to YouTube Search"}
+                  >
+                    <Youtube
+                      size={16}
+                      className="mr-1"
+                      color={isYouTubeModeActive ? 'white' : '#222'}
+                      strokeWidth={2.2}
+                    />
+                    <span style={{color: isYouTubeModeActive ? 'white' : '#222'}}>YT</span>
+                  </button>
                 </div>
                 
                 {/* Right Side Buttons */}
@@ -2001,7 +2106,7 @@ export default function ChatPage() {
                   <button
                     type="submit" 
                     disabled={isLoading || (!inputValue.trim() && !selectedFile && !uploadedFileInfo && !audioUrl)}
-                    className="p-2 send-button focus:outline-none focus:ring-2 focus:ring-gray-700 dark:focus:ring-gray-300 focus:ring-offset-2 focus:ring-offset-gray-100 dark:focus:ring-offset-[#161616] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square cursor-pointer button"
+                    className="p-2 send-button focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center aspect-square cursor-pointer button"
                     style={{ borderRadius: '16px' }}
                     title="Send message"
                   >
@@ -2018,6 +2123,40 @@ export default function ChatPage() {
           </div>
         </footer>
       </div>
+
+      {/* Custom styles for YT toggle */}
+      <style jsx>{`
+        .yt-default {
+          background: #fff;
+          border: 1.5px solid #e5e7eb;
+          color: #222;
+          outline: none !important;
+          box-shadow: none !important;
+        }
+        .dark .yt-default {
+          background: #1E1E1E; /* Darker background for dark mode */
+          border: 1.5px solid #2F2F2E; /* Darker border for dark mode */
+          color: #C8C8C8; /* Lighter text for dark mode */
+        }
+        .yt-active {
+          background: #ff5959 !important;
+          color: #fff !important;
+          border: none !important;
+          outline: none !important;
+          box-shadow: none !important;
+        }
+        .yt-default:focus, .yt-active:focus {
+          outline: none !important;
+          box-shadow: none !important;
+        }
+        .model-dropdown-toggle:focus {
+          outline: none !important;
+          box-shadow: none !important;
+        }
+        .send-button:hover {
+          /* Add specific non-hovered styles to override defaults */
+        }
+      `}</style>
 
       {/* Login Bottom Sheet Overlay - Rendered on top of the main app if needed */}
       {!currentUser && !isGuestMode && (

@@ -45,6 +45,27 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        {/* Add script to unregister service workers */}
+        <script dangerouslySetInnerHTML={{ __html: `
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+              for (let registration of registrations) {
+                registration.unregister();
+              }
+            });
+            caches.keys().then(function(names) {
+              for (let name of names) {
+                caches.delete(name);
+              }
+            });
+          }
+          // Clear local storage for this domain
+          localStorage.clear();
+          // Clear session storage for this domain
+          sessionStorage.clear();
+        `}} />
+      </head>
       <AuthProvider>
         <ThemeProvider>
           <ThemedBody>{children}</ThemedBody>

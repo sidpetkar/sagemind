@@ -3,7 +3,6 @@ import { GeminiService } from '@/lib/llm/gemini'; // Using path alias '@'
 import { PerplexityService } from '@/lib/llm/perplexity'; // Import the Perplexity service
 import { OpenRouterService } from '@/lib/llm/openrouter'; // Import the OpenRouter service
 import { OpenAIService } from '@/lib/llm/openai'; // Import the OpenAI service
-import { ReplicateService } from '@/lib/llm/replicate'; // Using path alias for Replicate
 import { ChatMessage, FileData, FileUri, LlmService } from '@/lib/llm/interface'; // Import LlmService
 import Together from 'together-ai'; // Added for Llama Vision
 
@@ -28,7 +27,6 @@ const geminiService = new GeminiService();
 const perplexityService = new PerplexityService();
 const openRouterService = new OpenRouterService();
 const openAIService = new OpenAIService();
-const replicateService = new ReplicateService(); // Instantiate ReplicateService
 // Explicitly set API key from environment variable
 const together = new Together({ 
   apiKey: process.env.TOGETHER_API_KEY 
@@ -37,11 +35,6 @@ const together = new Together({
 // Check for Together AI API Key immediately
 if (!process.env.TOGETHER_API_KEY) {
   console.warn("TOGETHER_API_KEY is not set. Together AI models will not be available.");
-}
-
-// Check for Replicate API Key
-if (!process.env.REPLICATE_API_TOKEN) {
-  console.warn("REPLICATE_API_TOKEN is not set. Replicate models will not be available.");
 }
 
 // Check for OpenRouter API Key
@@ -56,7 +49,6 @@ console.log("API Keys availability check:", {
   PERPLEXITY_API_KEY_SET: !!process.env.PERPLEXITY_API_KEY,
   TOGETHER_API_KEY_SET: !!process.env.TOGETHER_API_KEY,
   OPENROUTER_API_KEY_SET: !!process.env.OPENROUTER_API_KEY,
-  REPLICATE_API_TOKEN_SET: !!process.env.REPLICATE_API_TOKEN, // Added Replicate API token check
   NODE_ENV: process.env.NODE_ENV
 });
 
@@ -77,11 +69,6 @@ function getServiceForModel(modelName: string): LlmService {
   }
   if (modelName === 'gpt-4o-mini') {
     return openAIService;
-  }
-  // Add a condition for Replicate models (specifically Bagel for now)
-  if (modelName === 'replicate/bytedance/bagel' || modelName === 'black-forest-labs/flux-kontext-pro') { 
-    console.log(`Routing to ReplicateService for ${modelName}`);
-    return replicateService;
   }
   return geminiService; // Default to Gemini
 }
@@ -551,48 +538,9 @@ export async function POST(request: Request) {
       // Directly call the image generation handler and return its response
       return handleFluxImageRequest(processedMessage);
     }
-    // --- Handle Replicate/Bagel Model --- This condition must come BEFORE the generic getServiceForModel call
-    else if (modelName === 'bytedance/bagel' || modelName === 'black-forest-labs/flux-kontext-pro') {
-      if (!process.env.REPLICATE_API_TOKEN) {
-        return NextResponse.json({ error: `REPLICATE_API_TOKEN is not set. Replicate (${modelName}) model is not available.` }, { status: 503 });
-      }
-      try {
-        // The ReplicateService is now specialized for Bagel, so modelName can be passed for consistency if needed by the interface
-        // but the service itself uses the hardcoded BAGEL_MODEL_ID.
-        const streamIterable = await replicateService.generateResponse(processedMessage ?? '', serviceHistory, fileData, fileUri, modelName);
-        
-        const readableStream = new ReadableStream({
-          async start(controller) {
-            const encoder = new TextEncoder();
-            try {
-              for await (const payloadChunk of streamIterable) {
-                controller.enqueue(encoder.encode(JSON.stringify(payloadChunk) + '\n'));
-              }
-              controller.close();
-            } catch (error) {
-              console.error(`Error reading from Replicate stream (${modelName}):`, error);
-              const errorPayload = { text: `[Error: ${error instanceof Error ? error.message : `Unknown streaming error with ${modelName}`}]` };
-              controller.enqueue(encoder.encode(JSON.stringify(errorPayload) + '\n'));
-              controller.close();
-            }
-          },
-          cancel() {
-            console.log(`Replicate stream (${modelName}) cancelled by client.`);
-          }
-        });
-        
-        return new Response(readableStream, {
-          headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
-        });
-      } catch (error) {
-        console.error(`API Route Error (Replicate Handler - ${modelName}):`, error);
-        const errorMessage = error instanceof Error ? error.message : `Error processing Replicate request for ${modelName}`;
-        return NextResponse.json({ error: errorMessage }, { status: 500 });
-      }
-    }
-    // --- End Handle Replicate/Bagel Model ---
+    // --- End Handle Image Generation Model ---
 
-    // Select the appropriate service based on model name for Gemini/Perplexity (Default cases)
+    // Select the appropriate service based on model name for Gemini/Perplexity
     const selectedService = getServiceForModel(modelName || '');
     
     // Detect if we're using Perplexity (which doesn't support file uploads)

@@ -13,6 +13,9 @@ import rehypeSanitize from 'rehype-sanitize';
 import rehypeHighlight from 'rehype-highlight';
 import 'highlight.js/styles/github.css'; // Import a syntax highlighting theme
 
+// Import Lottie animation
+import Lottie from 'lottie-react';
+
 // Import SuperEllipseImg
 import { SuperEllipseImg } from "react-superellipse";
 
@@ -58,12 +61,15 @@ interface Message {
   imageBase64Preview?: string; // For image previews in user messages (temporary, not for storage)
   imagePreviewStoragePath?: string; // Storage path for user images
   imageBase64?: string; // For AI-generated base64 images (FLUX) (temporary, not for storage)
+  imageMimeType?: string; // Added for AI-generated image MIME type
   imageStoragePath?: string; // Storage path for AI-generated images
   imageUrl?: string; // For AI-generated images or image URLs
   webSearchQueries?: string[]; // For Google Search grounded queries
   renderedContent?: string; // For Google Search rendered suggestions
   sourceCitations?: string[]; // Array of source URLs for citations
   youtubeVideos?: YouTubeVideo[]; // Added for YouTube search results
+  isLoading?: boolean; // Added for loading state
+  thinking?: string; // Added for thinking text
 }
 
 interface ChatThread {
@@ -192,7 +198,60 @@ const YouTubeCarousel: React.FC<{ videos: YouTubeVideo[] }> = ({ videos }) => {
   );
 };
 
+// Loading Animation Component
+const LoadingAnimation: React.FC = () => {
+  const [animationData, setAnimationData] = useState<any>(null);
+  
+  useEffect(() => {
+    // Dynamically import the JSON file
+    fetch('/three-dot.json')
+      .then(response => response.json())
+      .then(data => setAnimationData(data))
+      .catch(err => console.error('Failed to load animation:', err));
+  }, []);
+  
+  // If the animation data hasn't loaded yet, show a simple fallback
+  if (!animationData) {
+    return (
+      <div className="flex items-center justify-center w-16 h-10">
+        <div className="flex space-x-2">
+          <div className="w-2 h-2 bg-gray-500 dark:bg-gray-300 rounded-full animate-bounce"></div>
+          <div className="w-2 h-2 bg-gray-500 dark:bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+          <div className="w-2 h-2 bg-gray-500 dark:bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+        </div>
+      </div>
+    );
+  }
+  
+  return (
+    <div className="flex items-center justify-center w-16 h-10">
+      <Lottie 
+        animationData={animationData} 
+        loop={true} 
+        autoplay={true}
+        style={{ width: '100%', height: '100%' }}
+      />
+    </div>
+  );
+};
+
 export default function ChatPage() {
+  // Model capabilities definition
+  const modelCapabilities: Record<string, { hasAttachment?: boolean; hasMic?: boolean }> = {
+    'gemini-2.0-flash': { hasAttachment: true, hasMic: true },
+    'gpt-4o-mini': { hasAttachment: true, hasMic: false },
+    'meta-llama/Llama-Vision-Free': { hasAttachment: true, hasMic: false },
+    'black-forest-labs/FLUX.1-schnell-Free': { hasAttachment: false, hasMic: false },
+    'black-forest-labs/flux-kontext-pro': { hasAttachment: true, hasMic: false }, // Added FLUX.1 Kontext capabilities
+    'bytedance/bagel': { hasAttachment: true, hasMic: false }, // Added Bagel
+    'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free': { hasAttachment: false, hasMic: false },
+    'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free': { hasAttachment: false, hasMic: false },
+    'qwen/qwen2.5-vl-72b-instruct:free': { hasAttachment: true, hasMic: false },
+    'sonar': { hasAttachment: false, hasMic: false },
+    'sonar-pro': { hasAttachment: false, hasMic: false },
+  };
+  
+  // State variables
   const { currentUser, authLoading } = useAuth(); // Use the auth context
   const { theme, toggleTheme } = useTheme(); // Use the theme context
 
@@ -790,6 +849,8 @@ export default function ChatPage() {
     { value: 'gpt-4o-mini', label: 'GPT-4o mini' },
     { value: 'meta-llama/Llama-Vision-Free', label: 'Llama Vision' },
     { value: 'black-forest-labs/FLUX.1-schnell-Free', label: 'FLUX.1 [schnell]' },
+    { value: 'black-forest-labs/flux-kontext-pro', label: 'FLUX.1 Kontext [pro]' }, // Added FLUX.1 Kontext
+    { value: 'bytedance/bagel', label: 'ByteDance Bagel' }, // Added Bagel
     { value: 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free', label: 'Llama 3.3 Instruct' },
     { value: 'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free', label: 'DeepSeek R1' },
     { value: 'qwen/qwen2.5-vl-72b-instruct:free', label: 'Qwen2.5 VL 72B' },
@@ -1069,7 +1130,8 @@ export default function ChatPage() {
                   ? chunkData.completeContent 
                   : (msg.content || '') + (chunkData.text || ''),
                 text: undefined, 
-                completeContent: undefined 
+                completeContent: undefined,
+                isLoading: false // Remove loading state when content starts streaming
               }
             : msg
         );
@@ -1080,7 +1142,8 @@ export default function ChatPage() {
           content: chunkData.completeContent || chunkData.text || '',
           ...chunkData,
           text: undefined, 
-          completeContent: undefined 
+          completeContent: undefined,
+          isLoading: false // Make sure the new message isn't in loading state
         }];
       }
     });
@@ -1173,7 +1236,17 @@ export default function ChatPage() {
       ...(currentUploadedFileInfo && { fileType: currentUploadedFileInfo.convertedType, fileName: currentUploadedFileInfo.name, imageBase64Preview: currentUploadedFileInfo.convertedType.startsWith('image/') ? currentUploadedFileInfo.base64 : undefined }),
       ...(currentAudioBlob && { audioUrl: URL.createObjectURL(currentAudioBlob), fileType: currentAudioBlob.type, fileName: 'audio_recording.webm' }),
     };
+    
+    // Add user message to the chat
     setMessages(prev => [...prev, userMessage]);
+    
+    // Add a temporary loading message from AI
+    const loadingMessage: Message = {
+      role: 'ai',
+      content: '',
+      isLoading: true
+    };
+    setMessages(prev => [...prev, loadingMessage]);
 
     // Clear inputs after capturing them
     setInputValue('');
@@ -1204,15 +1277,18 @@ export default function ChatPage() {
     
         const videos: YouTubeVideo[] = await response.json();
 
-        const aiYouTubeMessage: Message = {
-          role: 'ai',
-          content: videos.length > 0 ? `Found ${videos.length} videos for "${currentInput}":` : `No YouTube videos found for "${currentInput}".`,
-          youtubeVideos: videos,
-        };
-        // Update messages state first
-        const updatedMessagesWithYT = [...messages, userMessage, aiYouTubeMessage];
-        setMessages(updatedMessagesWithYT);
-        await saveCurrentChat(updatedMessagesWithYT); // Save chat with YouTube results using the constructed array
+        // Replace loading message with YouTube results
+        setMessages(prev => [
+          ...prev.slice(0, prev.length - 1),
+          {
+            role: 'ai',
+            content: videos.length > 0 ? `Found ${videos.length} videos for "${currentInput}":` : `No YouTube videos found for "${currentInput}".`,
+            youtubeVideos: videos,
+          }
+        ]);
+        
+        // Save the chat
+        saveCurrentChat();
 
       } else {
         // Handle LLM interaction
@@ -1261,18 +1337,23 @@ export default function ChatPage() {
         }
 
         // ---- HANDLE FLUX (Non-Streamed JSON) vs. Other (Streamed) Models ----
-        if (selectedModel === 'black-forest-labs/FLUX.1-schnell-Free') {
+        if (selectedModel === 'black-forest-labs/FLUX.1-schnell-Free' || selectedModel === 'replicate/bytedance/bagel') {
           // FLUX returns a single JSON object, not a stream
           const fluxPayload = await response.json();
-          const aiFluxMessage: Message = {
-            role: 'ai',
-            content: fluxPayload.text || '',
-            imageBase64: fluxPayload.imageBase64,
-          };
-          // Update messages state first
-          const updatedMessagesWithFlux = [...messages, userMessage, aiFluxMessage];
-          setMessages(updatedMessagesWithFlux);
-          await saveCurrentChat(updatedMessagesWithFlux); // Save chat with FLUX result using the constructed array
+          
+          // Replace loading message with FLUX result
+          setMessages(prev => [
+            ...prev.slice(0, prev.length - 1),
+            {
+              role: 'ai',
+              content: fluxPayload.text || '',
+              imageBase64: fluxPayload.imageBase64,
+              fileType: fluxPayload.fileType,
+            }
+          ]);
+          
+          // Save the chat
+          saveCurrentChat();
         } else {
           // Handle streamed response for other models
           if (!response.body) {
@@ -1284,7 +1365,8 @@ export default function ChatPage() {
           let webSearchQueries: string[] | undefined = undefined;
           let renderedContent: string | undefined = undefined;
           let sourceCitations: string[] | undefined = undefined;
-          // Note: FLUX imageBase64 is handled above, so it won't be processed here.
+          let imageBase64: string | undefined = undefined; // Added to capture image for streaming models
+          let imageMimeType: string | undefined = undefined; // Added to capture MIME type
 
           while (true) {
             const { done, value } = await reader.read();
@@ -1298,21 +1380,24 @@ export default function ChatPage() {
             if (jsonObjects && jsonObjects.length > 0) {
               jsonObjects.forEach(objStr => {
                 try {
-                  const parsedChunk = JSON.parse(objStr.trim()) as {text?: string, webSearchQueries?: string[], renderedContent?: string, sourceCitations?: string[] /* imageBase64 removed here */ };
+                  const parsedChunk = JSON.parse(objStr.trim()) as {text?: string, webSearchQueries?: string[], renderedContent?: string, sourceCitations?: string[], imageBase64?: string, imageMimeType?: string };
                   
                   if (parsedChunk.text) {
                     accumulatedText += parsedChunk.text;
-                    console.log("Accumulated text now:", accumulatedText.length, "chars"); 
                   }
                   if (parsedChunk.webSearchQueries) webSearchQueries = parsedChunk.webSearchQueries;
                   if (parsedChunk.renderedContent) renderedContent = parsedChunk.renderedContent;
                   if (parsedChunk.sourceCitations) sourceCitations = parsedChunk.sourceCitations;
+                  if (parsedChunk.imageBase64) imageBase64 = parsedChunk.imageBase64; // Capture imageBase64
+                  if (parsedChunk.imageMimeType) imageMimeType = parsedChunk.imageMimeType; // Capture imageMimeType
 
                   updateAiMessage({
                     completeContent: accumulatedText, 
                     webSearchQueries: webSearchQueries,
                     renderedContent: renderedContent,
                     sourceCitations: sourceCitations,
+                    imageBase64: imageBase64, // Pass to updateAiMessage
+                    imageMimeType: imageMimeType, // Pass to updateAiMessage
                   });
                 } catch (e) {
                   console.error("Failed to parse chunk:", objStr, e);
@@ -1343,119 +1428,17 @@ export default function ChatPage() {
     } catch (err: any) {
       console.error("Error in handleSubmit:", err);
       setError(err.message || 'An error occurred while fetching the response.');
-      // Add an error message to the chat
-      setMessages(prev => [...prev, { role: 'ai', content: `Error: ${err.message || 'Something went wrong.'}` }]);
+      // Remove loading message and add an error message to the chat
+      setMessages(prev => [
+        ...prev.slice(0, prev.length - 1),
+        { role: 'ai', content: `Error: ${err.message || 'Something went wrong.'}` }
+      ]);
     } finally {
       setIsLoading(false);
       // Auto-scroll to bottom after response is fully processed or on error
       // Ensure this only happens if user hasn't manually scrolled up
       if (!isAutoScrollingPaused) {
         scrollToBottom();
-      }
-    }
-  };
-
-  // Define model capabilities
-  const modelCapabilities: Record<string, { hasAttachment?: boolean; hasMic?: boolean }> = {
-    'gemini-2.0-flash': { hasAttachment: true, hasMic: true },
-    'gpt-4o-mini': { hasAttachment: true, hasMic: false },
-    'meta-llama/Llama-Vision-Free': { hasAttachment: true, hasMic: false },
-    'black-forest-labs/FLUX.1-schnell-Free': { hasAttachment: false, hasMic: false },
-    'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free': { hasAttachment: false, hasMic: false },
-    'deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free': { hasAttachment: false, hasMic: false }, // Corrected MhasMic to hasMic
-    'qwen/qwen2.5-vl-72b-instruct:free': { hasAttachment: true, hasMic: false },
-    // Removed microsoft/phi-4-reasoning-plus:free capability
-    'sonar': { hasAttachment: false, hasMic: false },
-    'sonar-pro': { hasAttachment: false, hasMic: false },
-  };
-
-  // Modify the dropdown click handler to prevent error display
-  const handleModelDropdownToggle = (e: React.MouseEvent) => {
-    e.preventDefault(); // Prevent default behavior
-    e.stopPropagation(); // Stop event propagation
-    setIsModelDropdownOpen(!isModelDropdownOpen);
-    // Clear any error that might be showing
-    setError(null);
-  };
-
-  // Effect for auto-scrolling to the bottom when messages change and auto-scroll is not paused
-  useEffect(() => {
-    if (!isAutoScrollingPaused && isLoading && messagesEndRef.current) {
-      // If a scroll is already pending, clear it to avoid queuing multiple scrolls
-      if (programmaticScrollTimeoutRef.current) {
-        clearTimeout(programmaticScrollTimeoutRef.current);
-      }
-
-      // Set a new timeout. This ID will be stored in programmaticScrollTimeoutRef.current.
-      // handleChatScroll will see this non-null ref and ignore the scroll events
-      // caused by the scrollIntoView call.
-      programmaticScrollTimeoutRef.current = setTimeout(() => {
-        // Re-check conditions like isAutoScrollingPaused inside the timeout,
-        // as state might have changed during the timeout delay.
-        if (messagesEndRef.current && !isAutoScrollingPaused && isLoading) {
-          messagesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        }
-
-        // After the scrollIntoView is initiated, we need to clear programmaticScrollTimeoutRef.current
-        // so that subsequent USER scrolls are not ignored.
-        // This should happen after a delay that is long enough for the 'smooth' scroll
-        // animation to complete and its scroll events to be processed and ignored.
-        const clearRefDelay = 200; // Adjusted delay for smooth scroll completion
-        setTimeout(() => {
-          programmaticScrollTimeoutRef.current = null;
-        }, clearRefDelay);
-
-      }, 50); // A small delay before initiating the scroll.
-
-      // Cleanup function for the effect
-      return () => {
-        if (programmaticScrollTimeoutRef.current) {
-          clearTimeout(programmaticScrollTimeoutRef.current);
-          programmaticScrollTimeoutRef.current = null;
-        }
-      };
-    }
-  }, [messages, isLoading, isAutoScrollingPaused]);
-
-  // Scroll handler for the chat container to detect user scrolls
-  const handleChatScroll = () => {
-    if (programmaticScrollTimeoutRef.current) {
-      return;
-    }
-
-    const container = chatContainerRef.current;
-    if (container) {
-      const scrollThreshold = 30; 
-      const isNearBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < scrollThreshold;
-
-      // Always clear the inactivity timer on any user scroll action
-      if (userScrollInactivityTimerRef.current) {
-        clearTimeout(userScrollInactivityTimerRef.current);
-        userScrollInactivityTimerRef.current = null;
-      }
-
-      if (!isNearBottom) {
-        // User has scrolled up. Pause auto-scrolling.
-        if (!isAutoScrollingPaused) { // Set pause only if not already paused
-          setIsAutoScrollingPaused(true);
-        }
-        
-        // Start a timer: if user remains inactive, resume auto-scroll
-        userScrollInactivityTimerRef.current = setTimeout(() => {
-          // Check if still paused and user hasn't scrolled back to bottom manually during the timeout
-          const stillScrolledUp = (container.scrollHeight - container.scrollTop - container.clientHeight) >= scrollThreshold;
-          if (isAutoScrollingPaused && stillScrolledUp) {
-            setIsAutoScrollingPaused(false); // This will trigger useEffect to scroll if needed
-          }
-          userScrollInactivityTimerRef.current = null;
-        }, 1500); // 1.5 seconds of inactivity
-
-      } else {
-        // User is at or has scrolled back to the bottom. Resume auto-scrolling.
-        if (isAutoScrollingPaused) { // Resume only if it was paused
-          setIsAutoScrollingPaused(false);
-        }
-        // No need to start an inactivity timer if user is already at the bottom
       }
     }
   };
@@ -1495,6 +1478,56 @@ export default function ChatPage() {
     console.log("History button clicked, toggling isHistoryModalOpen from:", isHistoryModalOpen);
     setIsHistoryModalOpen(prev => !prev); 
     // Fetching is now handled by the onSnapshot listener, so no need to fetch on open.
+  };
+
+  // Modify the dropdown click handler to prevent error display
+  const handleModelDropdownToggle = (e: React.MouseEvent) => {
+    e.preventDefault(); // Prevent default behavior
+    e.stopPropagation(); // Stop event propagation
+    setIsModelDropdownOpen(!isModelDropdownOpen);
+    // Clear any error that might be showing
+    setError(null);
+  };
+
+  const handleChatScroll = () => {
+    if (programmaticScrollTimeoutRef.current) {
+      return;
+    }
+
+    const container = chatContainerRef.current;
+    if (container) {
+      const scrollThreshold = 30; 
+      const isNearBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < scrollThreshold;
+
+      // Always clear the inactivity timer on any user scroll action
+      if (userScrollInactivityTimerRef.current) {
+        clearTimeout(userScrollInactivityTimerRef.current);
+        userScrollInactivityTimerRef.current = null;
+      }
+
+      if (!isNearBottom) {
+        // User has scrolled up. Pause auto-scrolling.
+        if (!isAutoScrollingPaused) { // Set pause only if not already paused
+          setIsAutoScrollingPaused(true);
+        }
+        
+        // Start a timer: if user remains inactive, resume auto-scroll
+        userScrollInactivityTimerRef.current = setTimeout(() => {
+          // Check if still paused and user hasn't scrolled back to bottom manually during the timeout
+          const stillScrolledUp = (container.scrollHeight - container.scrollTop - container.clientHeight) >= scrollThreshold;
+          if (isAutoScrollingPaused && stillScrolledUp) {
+            setIsAutoScrollingPaused(false); // This will trigger useEffect to scroll if needed
+          }
+          userScrollInactivityTimerRef.current = null;
+        }, 1500); // 1.5 seconds of inactivity
+      } else {
+        // User is at or has scrolled back to the bottom. Resume auto-scrolling.
+        if (isAutoScrollingPaused) { // Resume only if it was paused
+          setIsAutoScrollingPaused(false);
+        }
+        // No need to start an inactivity timer if user is already at the bottom
+      }
+    }
   };
 
   if (authLoading) {
@@ -1655,167 +1688,161 @@ export default function ChatPage() {
                 >
                   {msg.role === 'ai' ? (
                     <>
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        rehypePlugins={[rehypeRaw, rehypeSanitize, rehypeHighlight]}
-                        components={{
-                          table: ({node, ...props}) => (
-                            <div className="my-6 overflow-x-auto rounded-2xl border border-gray-300 dark:border-[#2F2F2E]">
-                              <table className="min-w-full" {...props} />
-                            </div>
-                          ),
-                          thead: ({node, ...props}) => (
-                            <thead className="bg-gray-100 dark:bg-[#1E1E1E]" {...props} />
-                          ),
-                          th: ({node, ...props}) => (
-                            <th
-                              className="px-4 py-3 text-left text-xs font-semibold text-gray-700 dark:text-[#A6A6A6] uppercase tracking-wider border-b border-r last:border-r-0 border-gray-200 dark:border-[#2F2F2E]"
-                              {...props}
-                            />
-                          ),
-                          tbody: ({node, ...props}) => (
-                            <tbody className="dark:divide-[#2F2F2E]" {...props} />
-                          ),
-                          tr: ({node, ...props}) => (
-                            <tr className="hover:bg-gray-100 dark:hover:bg-[#1E1E1E] transition-colors" {...props} />
-                          ),
-                          td: ({node, ...props}) => (
-                            <td className="px-4 py-3 text-sm text-gray-700 dark:text-[#A6A6A6] border-b border-r last:border-r-0 border-gray-200 dark:border-[#2F2F2E]" {...props} />
-                          ),
-                          // Custom text component to handle the citation links directly in markdown
-                          text: ({children}) => {
-                            if (typeof children === 'string' && msg.sourceCitations?.length) {
-                              return <>{processCitationMarkers(children, msg.sourceCitations)}</>;
-                            }
-                            // Ensure AI text is also styled for dark mode
-                            return <span className="dark:text-[#F9FAFB]">{children}</span>;
-                          },
-                          code: ({ inline, className, children, ...props }: React.ComponentProps<'code'> & { inline?: boolean }) => { 
-                            const match = /language-(\w+)/.exec(className || '');
-                            const highlightLanguage = match?.[1] || '';
-                            
-                            if (inline) {
-                              return (
-                                <code 
-                                  className="px-1 py-0.5 bg-gray-200 dark:bg-[#1E1E1E] text-pink-600 dark:text-pink-400 rounded text-sm font-mono overflow-wrap-break-word"
-                                  data-language={highlightLanguage}
+                      {msg.isLoading ? (
+                        <LoadingAnimation />
+                      ) : (
+                        <>
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            rehypePlugins={[rehypeRaw, rehypeSanitize, rehypeHighlight]}
+                            components={{
+                              table: ({node, ...props}) => (
+                                <div className="my-6 overflow-x-auto rounded-2xl border border-gray-300 dark:border-[#2F2F2E]">
+                                  <table className="min-w-full" {...props} />
+                                </div>
+                              ),
+                              thead: ({node, ...props}) => (
+                                <thead className="bg-gray-100 dark:bg-[#1E1E1E]" {...props} />
+                              ),
+                              th: ({node, ...props}) => (
+                                <th
+                                  className="px-4 py-3 text-left text-xs font-semibold text-gray-700 dark:text-[#A6A6A6] uppercase tracking-wider border-b border-r last:border-r-0 border-gray-200 dark:border-[#2F2F2E]"
                                   {...props}
-                                >
-                                  {children}
-                                </code>
-                              );
-                            }
-                            return (
-                              <code 
-                                className={`${className} overflow-wrap-break-word`}
-                                data-language={highlightLanguage}
-                                {...props}
-                              >
-                                {children}
-                              </code>
-                            );
-                          },
-                          pre: ({ children, ...props }: React.ComponentProps<'pre'>) => {
-                            let language: string = '';
-                            if (children && typeof children === 'object' && 'props' in children) {
-                              const childProps = (children as React.ReactElement).props as { className?: string };
-                              const match = /language-(\w+)/.exec(childProps?.className || '');
-                              language = match?.[1] || '';
-                            }
-                            const preClassName = language === 'sql'
-                                ? "rounded-md bg-gray-900 dark:bg-[#1E1E1E] my-4 p-4 font-mono text-sm text-gray-100 dark:text-[#F9FAFB]"
-                                : "rounded-md bg-gray-100 dark:bg-[#1E1E1E] my-4 p-4 font-mono text-sm text-gray-800 dark:text-[#F9FAFB]";
-                            return <pre className={`${preClassName} whitespace-pre-wrap word-break-all overflow-x-hidden`} {...props}>{children}</pre>;
-                          },
-                          blockquote: ({node, ...props}) => (
-                            <blockquote className="pl-4 border-l-4 border-blue-400 dark:border-blue-500 italic text-gray-600 dark:text-[#A6A6A6] my-4 overflow-wrap-break-word" {...props} />
-                          ),
-                          li: ({node, ...props}) => <li className="ml-6 my-2 list-disc text-gray-700 dark:text-[#A6A6A6] overflow-wrap-break-word" {...props} />,
-                          hr: ({node, ...props}) => <hr className="my-6 border-t border-gray-300 dark:border-[#2F2F2E]" {...props} />,
-                          a: ({node, ...props}) => (
-                            <a 
-                              className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline overflow-wrap-break-word"
-                              target="_blank" 
-                              rel="noopener noreferrer" 
-                              {...props}
-                            />
-                          ),
-                          img: ({node, ...props}) => (
-                            <img 
-                              className="max-w-full h-auto rounded-lg my-4 shadow-sm dark:shadow-none"
-                              alt={props.alt || 'Image loaded from markdown'} 
-                              {...props} 
-                            />
-                          ),
-                          p: ({node, ...props}) => <p className="my-3 text-gray-800 dark:text-[#F9FAFB] overflow-wrap-break-word" {...props} />,
-                          h1: ({node, ...props}) => <h1 className="text-2xl font-bold mt-6 mb-4 text-gray-900 dark:text-[#F9FAFB] overflow-wrap-break-word" {...props} />,
-                          h2: ({node, ...props}) => <h2 className="text-xl font-bold mt-5 mb-3 text-gray-900 dark:text-[#F9FAFB] overflow-wrap-break-word" {...props} />,
-                          h3: ({node, ...props}) => <h3 className="text-lg font-bold mt-4 mb-2 text-gray-900 dark:text-[#A6A6A6] overflow-wrap-break-word" {...props} />,
-                        }}
-                      >
-                        {msg.content}
-                      </ReactMarkdown>
+                                />
+                              ),
+                              tbody: ({node, ...props}) => (
+                                <tbody className="dark:divide-[#2F2F2E]" {...props} />
+                              ),
+                              tr: ({node, ...props}) => (
+                                <tr className="hover:bg-gray-100 dark:hover:bg-[#1E1E1E] transition-colors" {...props} />
+                              ),
+                              td: ({node, ...props}) => (
+                                <td className="px-4 py-3 text-sm text-gray-700 dark:text-[#A6A6A6] border-b border-r last:border-r-0 border-gray-200 dark:border-[#2F2F2E]" {...props} />
+                              ),
+                              // Custom text component to handle the citation links directly in markdown
+                              text: ({children}) => {
+                                if (typeof children === 'string' && msg.sourceCitations?.length) {
+                                  return <>{processCitationMarkers(children, msg.sourceCitations)}</>;
+                                }
+                                // Ensure AI text is also styled for dark mode
+                                return <span className="dark:text-[#F9FAFB]">{children}</span>;
+                              },
+                              code: ({ inline, className, children, ...props }: React.ComponentProps<'code'> & { inline?: boolean }) => { 
+                                const match = /language-(\w+)/.exec(className || '');
+                                const highlightLanguage = match?.[1] || '';
+                                
+                                if (inline) {
+                                  return (
+                                    <code 
+                                      className="px-1 py-0.5 bg-gray-200 dark:bg-[#1E1E1E] text-pink-600 dark:text-pink-400 rounded text-sm font-mono overflow-wrap-break-word"
+                                      data-language={highlightLanguage}
+                                      {...props}
+                                    >
+                                      {children}
+                                    </code>
+                                  );
+                                }
+                                return (
+                                  <code 
+                                    className={`${className} overflow-wrap-break-word`}
+                                    data-language={highlightLanguage}
+                                    {...props}
+                                  >
+                                    {children}
+                                  </code>
+                                );
+                              },
+                              pre: ({ children, ...props }: React.ComponentProps<'pre'>) => {
+                                let language: string = '';
+                                if (children && typeof children === 'object' && 'props' in children) {
+                                  const childProps = (children as React.ReactElement).props as { className?: string };
+                                  const match = /language-(\w+)/.exec(childProps?.className || '');
+                                  language = match?.[1] || '';
+                                }
+                                const preClassName = language === 'sql'
+                                    ? "rounded-md bg-gray-900 dark:bg-[#1E1E1E] my-4 p-4 font-mono text-sm text-gray-100 dark:text-[#F9FAFB]"
+                                    : "rounded-md bg-gray-100 dark:bg-[#1E1E1E] my-4 p-4 font-mono text-sm text-gray-800 dark:text-[#F9FAFB]";
+                                return <pre className={`${preClassName} whitespace-pre-wrap word-break-all overflow-x-hidden`} {...props}>{children}</pre>;
+                              },
+                              blockquote: ({node, ...props}) => (
+                                <blockquote className="pl-4 border-l-4 border-blue-400 dark:border-blue-500 italic text-gray-600 dark:text-[#A6A6A6] my-4 overflow-wrap-break-word" {...props} />
+                              ),
+                              li: ({node, ...props}) => <li className="ml-6 my-2 list-disc text-gray-700 dark:text-[#A6A6A6] overflow-wrap-break-word" {...props} />,
+                              hr: ({node, ...props}) => <hr className="my-6 border-t border-gray-300 dark:border-[#2F2F2E]" {...props} />,
+                              a: ({node, ...props}) => (
+                                <a 
+                                  className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline overflow-wrap-break-word"
+                                  target="_blank" 
+                                  rel="noopener noreferrer" 
+                                  {...props}
+                                />
+                              ),
+                              img: ({node, ...props}) => (
+                                <img 
+                                  className="max-w-full h-auto rounded-lg my-4 shadow-sm dark:shadow-none"
+                                  alt={props.alt || 'Image loaded from markdown'} 
+                                  {...props} 
+                                />
+                              ),
+                              p: ({node, ...props}) => <p className="my-3 text-gray-800 dark:text-[#F9FAFB] overflow-wrap-break-word" {...props} />,
+                              h1: ({node, ...props}) => <h1 className="text-2xl font-bold mt-6 mb-4 text-gray-900 dark:text-[#F9FAFB] overflow-wrap-break-word" {...props} />,
+                              h2: ({node, ...props}) => <h2 className="text-xl font-bold mt-5 mb-3 text-gray-900 dark:text-[#F9FAFB] overflow-wrap-break-word" {...props} />,
+                              h3: ({node, ...props}) => <h3 className="text-lg font-bold mt-4 mb-2 text-gray-900 dark:text-[#A6A6A6] overflow-wrap-break-word" {...props} />,
+                            }}
+                          >
+                            {msg.content}
+                          </ReactMarkdown>
 
-                      {msg.renderedContent && (
-                        <div className="mt-3 search-suggestions-container dark:text-[#F9FAFB]" dangerouslySetInnerHTML={{ __html: msg.renderedContent }} />
-                      )}
+                          {msg.renderedContent && (
+                            <div className="mt-3 search-suggestions-container dark:text-[#F9FAFB]" dangerouslySetInnerHTML={{ __html: msg.renderedContent }} />
+                          )}
 
-                      {!msg.renderedContent && msg.webSearchQueries && msg.webSearchQueries.length > 0 && (
-                        <div className="mt-3 search-suggestions-container">
-                          <p className="text-sm font-semibold text-gray-600 dark:text-[#A6A6A6] mb-1">Search Suggestions:</p>
-                          <div className="flex flex-wrap gap-2" role="list">
-                            {msg.webSearchQueries.map((query, i) => (
-                              <a
-                                key={i}
-                                href={`https://www.google.com/search?q=${encodeURIComponent(query)}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="search-chip bg-gray-200 dark:bg-[#292929] text-gray-700 dark:text-[#F9FAFB] hover:bg-gray-300 dark:hover:bg-[#1E1E1E]"
-                              >
-                                <img src="https://www.google.com/favicon.ico" alt="Google" />
-                                {query}
-                              </a>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      
-                      {msg.imageBase64 && (
-                        <div className="mt-2">
-                          <img
-                            src={`data:image/jpeg;base64,${msg.imageBase64}`}
-                            alt="Generated by AI"
-                            className="max-w-full md:max-w-md h-auto rounded-2xl cursor-pointer hover:opacity-80 transition-opacity dark:shadow-none"
-                            onClick={() => handleOpenImageOverlay(`data:image/jpeg;base64,${msg.imageBase64}`)}
-                          />
-                        </div>
-                      )}
-                      
-                      {msg.imageUrl && !msg.imageBase64 && (
-                        <div className="mt-2">
-                          <img
-                            src={msg.imageUrl}
-                            alt="Generated by AI"
-                            className="max-w-md h-auto rounded-lg cursor-pointer hover:opacity-80 transition-opacity dark:shadow-none"
-                            onClick={() => msg.imageUrl && handleOpenImageOverlay(msg.imageUrl)}
-                          />
-                        </div>
-                      )}
-                      {/* Display YouTube Carousel if videos are present */}
-                      {msg.youtubeVideos && msg.youtubeVideos.length > 0 && (
-                        <YouTubeCarousel videos={msg.youtubeVideos} />
-                      )}
-
-                      {/* Display AI generated image if present (FLUX) */}
-                      {msg.imageBase64 && (
-                        <div className="mt-2">
-                          <img
-                            src={`data:image/jpeg;base64,${msg.imageBase64}`}
-                            alt="Generated by AI"
-                            className="max-w-full md:max-w-md h-auto rounded-2xl cursor-pointer hover:opacity-80 transition-opacity dark:shadow-none"
-                            onClick={() => handleOpenImageOverlay(`data:image/jpeg;base64,${msg.imageBase64}`)}
-                          />
-                        </div>
+                          {!msg.renderedContent && msg.webSearchQueries && msg.webSearchQueries.length > 0 && (
+                            <div className="mt-3 search-suggestions-container">
+                              <p className="text-sm font-semibold text-gray-600 dark:text-[#A6A6A6] mb-1">Search Suggestions:</p>
+                              <div className="flex flex-wrap gap-2" role="list">
+                                {msg.webSearchQueries.map((query, i) => (
+                                  <a
+                                    key={i}
+                                    href={`https://www.google.com/search?q=${encodeURIComponent(query)}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="search-chip bg-gray-200 dark:bg-[#292929] text-gray-700 dark:text-[#F9FAFB] hover:bg-gray-300 dark:hover:bg-[#1E1E1E]"
+                                  >
+                                    <img src="https://www.google.com/favicon.ico" alt="Google" />
+                                    {query}
+                                  </a>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          
+                          {msg.imageBase64 && (
+                            <div className="mt-2">
+                              <img
+                                src={`data:${msg.imageMimeType || 'image/jpeg'};base64,${msg.imageBase64}`}
+                                alt="Generated by AI"
+                                className="max-w-full md:max-w-md h-auto rounded-2xl cursor-pointer hover:opacity-80 transition-opacity dark:shadow-none"
+                                onClick={() => handleOpenImageOverlay(`data:${msg.imageMimeType || 'image/jpeg'};base64,${msg.imageBase64}`)}
+                              />
+                            </div>
+                          )}
+                          
+                          {msg.imageUrl && !msg.imageBase64 && (
+                            <div className="mt-2">
+                              <img
+                                src={msg.imageUrl}
+                                alt="Generated by AI"
+                                className="max-w-md h-auto rounded-lg cursor-pointer hover:opacity-80 transition-opacity dark:shadow-none"
+                                onClick={() => msg.imageUrl && handleOpenImageOverlay(msg.imageUrl)}
+                              />
+                            </div>
+                          )}
+                          {/* Display YouTube Carousel if videos are present */}
+                          {msg.youtubeVideos && msg.youtubeVideos.length > 0 && (
+                            <YouTubeCarousel videos={msg.youtubeVideos} />
+                          )}
+                        </>
                       )}
                     </>
                   ) : (
@@ -2049,6 +2076,9 @@ export default function ChatPage() {
                     style={{
                       borderRadius: '12px',
                       minWidth: '60px',
+                      backgroundColor: theme === 'dark' && !isYouTubeModeActive ? '#161616' : undefined,
+                      borderColor: theme === 'dark' && !isYouTubeModeActive ? '#2F2F2E' : undefined,
+                      color: theme === 'dark' && !isYouTubeModeActive ? '#C8C8C8' : undefined
                     }}
                     title={isYouTubeModeActive ? "Switch to AI Chat" : "Switch to YouTube Search"}
                     aria-label={isYouTubeModeActive ? "Switch to AI Chat" : "Switch to YouTube Search"}
@@ -2056,10 +2086,9 @@ export default function ChatPage() {
                     <Youtube
                       size={16}
                       className="mr-1"
-                      color={isYouTubeModeActive ? 'white' : '#222'}
                       strokeWidth={2.2}
                     />
-                    <span style={{color: isYouTubeModeActive ? 'white' : '#222'}}>YT</span>
+                    <span>{isYouTubeModeActive ? 'YT' : 'YT'}</span>
                   </button>
                 </div>
                 
@@ -2125,34 +2154,69 @@ export default function ChatPage() {
       </div>
 
       {/* Custom styles for YT toggle */}
-      <style jsx>{`
+      <style jsx global>{`
+        /* Light mode - Default state */
         .yt-default {
-          background: #fff;
-          border: 1.5px solid #e5e7eb;
-          color: #222;
+          background-color: #fff !important;
+          border: 1.5px solid #e5e7eb !important;
+          color: #222 !important;
           outline: none !important;
           box-shadow: none !important;
         }
+        
+        /* Dark mode - Default state */
+        html.dark .yt-default,
         .dark .yt-default {
-          background: #1E1E1E; /* Darker background for dark mode */
-          border: 1.5px solid #2F2F2E; /* Darker border for dark mode */
-          color: #C8C8C8; /* Lighter text for dark mode */
+          background-color: #161616 !important;
+          border: 1.5px solid #2F2F2E !important;
+          color: #C8C8C8 !important;
         }
+        
+        /* Both modes - Active state */
         .yt-active {
-          background: #ff5959 !important;
+          background-color: #ff5959 !important;
           color: #fff !important;
           border: none !important;
           outline: none !important;
           box-shadow: none !important;
+          border-color: transparent !important;
         }
+        
+        /* Hover effects */
+        .yt-default:hover {
+          background-color: #f9fafb !important;
+        }
+        
+        html.dark .yt-default:hover,
+        .dark .yt-default:hover {
+          background-color: #292929 !important;
+        }
+        
+        /* Focus states */
         .yt-default:focus, .yt-active:focus {
           outline: none !important;
           box-shadow: none !important;
         }
+
+        /* Ensure icon colors match */
+        .yt-default svg {
+          stroke: #222 !important;
+        }
+        
+        html.dark .yt-default svg,
+        .dark .yt-default svg {
+          stroke: #C8C8C8 !important;
+        }
+        
+        .yt-active svg {
+          stroke: white !important;
+        }
+        
         .model-dropdown-toggle:focus {
           outline: none !important;
           box-shadow: none !important;
         }
+        
         .send-button:hover {
           /* Add specific non-hovered styles to override defaults */
         }

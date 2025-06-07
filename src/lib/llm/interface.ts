@@ -1,7 +1,10 @@
+import { YouTubeVideo } from "../youtube"; // Added import for YouTubeVideo type
+
 // Define a type for the chat history messages
 export interface ChatMessage {
-  role: "user" | "model"; // Use "model" to align with the Gemini SDK
+  role: "user" | "model" | "assistant"; // Use "model" to align with the Gemini SDK, "assistant" for Replicate
   content: string;
+  imageBase64?: string; // Optional field for images from assistant
 }
 
 // Add interface for processed file data (inline base64)
@@ -20,5 +23,19 @@ export interface FileUri {
 export interface LlmService {
   // Update signature to accept fileUri as an alternative to fileData
   // and to yield structured objects for text and grounding information.
-  generateResponse(message: string, history?: ChatMessage[], fileData?: FileData, fileUri?: FileUri, modelName?: string): Promise<AsyncIterable<{ text?: string; webSearchQueries?: string[]; renderedContent?: string }>>;
+  generateResponse(
+    message: string, 
+    history: ChatMessage[], 
+    fileData?: FileData, 
+    fileUri?: FileUri,
+    modelName?: string
+  ): Promise<AsyncIterable<{ 
+    text?: string; 
+    webSearchQueries?: string[]; 
+    renderedContent?: string; 
+    imageBase64?: string; 
+    imageMimeType?: string; // Added for specifying the type of imageBase64
+    sourceCitations?: string[]; 
+    youtubeVideos?: YouTubeVideo[];
+  }>>;
 } 

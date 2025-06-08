@@ -83,11 +83,15 @@ export class ReplicateService implements LlmService {
         targetModelApiName = 'bytedance/bagel:7dd8def79e503990740db4704fa81af995d440fefe714958531d7044d2757c9c';
         // Bagel-specific inputs
         Object.assign(input, {
-            cfg_img_scale: 1.5,
+            cfg_img_scale: 1,
             cfg_text_scale: 4,
-            output_format: "jpg",
-            output_quality: 100,
+            output_format: "webp",
+            output_quality: 90,
             enable_thinking: true,
+            cfg_renorm_min: 1,
+            timestep_shift: 3,
+            cfg_renorm_type: "global",
+            num_inference_steps: 50,
         });
 
         const { task, image } = determineUserIntent(message, fileData, fileUri, history);

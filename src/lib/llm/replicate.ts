@@ -148,15 +148,22 @@ export class ReplicateService implements LlmService {
         // This requires a more complex state management than currently implemented here.
     }
 
-    console.log(`Replicate Service: Sending request to model ${targetModelApiName}. Input keys: ${Object.keys(input).join(', ')}`);
+    console.log(`Replicate Service: Sending request to model ${modelName}. Input keys: ${Object.keys(input).join(', ')}`);
 
     try {
       // Don't wait for the prediction to complete on the server.
       // Start it and immediately return the prediction object to the client.
-      const prediction = await replicate.predictions.create({
-        model: targetModelApiName as `${string}/${string}:${string}`,
-        input: input,
-      });
+      const createPayload: any = { input };
+      if (modelName === 'bytedance/bagel') {
+        // For Bagel, we must use the specific version hash to create a prediction.
+        // The model identifier string with the hash causes a 404.
+        createPayload.version = '7dd8def79e503990740db4704fa81af995d440fefe714958531d7044d2757c9c';
+      } else {
+        // For other models, we can use the model name.
+        createPayload.model = targetModelApiName;
+      }
+
+      const prediction = await replicate.predictions.create(createPayload);
 
       // The client will use this to poll for the result.
       return (async function*() {

@@ -1337,18 +1337,18 @@ export default function ChatPage() {
         }
 
         // ---- HANDLE FLUX (Non-Streamed JSON) vs. Other (Streamed) Models ----
-        if (selectedModel === 'black-forest-labs/FLUX.1-schnell-Free' || selectedModel === 'replicate/bytedance/bagel') {
-          // FLUX returns a single JSON object, not a stream
-          const fluxPayload = await response.json();
+        if (selectedModel === 'black-forest-labs/FLUX.1-schnell-Free' || selectedModel === 'bytedance/bagel' || selectedModel === 'black-forest-labs/flux-kontext-pro') {
+          // These models returns a single JSON object, not a stream
+          const payload = await response.json();
           
-          // Replace loading message with FLUX result
+          // Replace loading message with the result
           setMessages(prev => [
             ...prev.slice(0, prev.length - 1),
             {
               role: 'ai',
-              content: fluxPayload.text || '',
-              imageBase64: fluxPayload.imageBase64,
-              fileType: fluxPayload.fileType,
+              content: payload.text || '',
+              imageBase64: payload.imageBase64,
+              imageMimeType: payload.imageMimeType,
             }
           ]);
           

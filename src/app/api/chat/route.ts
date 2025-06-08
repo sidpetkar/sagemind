@@ -79,7 +79,7 @@ function getServiceForModel(modelName: string): LlmService {
     return openAIService;
   }
   // Add a condition for Replicate models (specifically Bagel for now)
-  if (modelName === 'replicate/bytedance/bagel' || modelName === 'black-forest-labs/flux-kontext-pro') { 
+  if (modelName === 'bytedance/bagel' || modelName === 'black-forest-labs/flux-kontext-pro') { 
     console.log(`Routing to ReplicateService for ${modelName}`);
     return replicateService;
   }

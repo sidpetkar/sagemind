@@ -174,7 +174,7 @@ export class ReplicateService implements LlmService {
         let textOutput: string | undefined;
         let mimeType: string = 'image/jpeg'; // Default
 
-        if (modelName === 'replicate/bytedance/bagel') {
+        if (modelName === 'bytedance/bagel') {
             mimeType = 'image/jpeg';
             if (output && typeof output === 'object' && !Array.isArray(output)) {
                 const bagelOutput = output as ReplicateOutput;

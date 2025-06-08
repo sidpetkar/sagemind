@@ -80,7 +80,7 @@ export class ReplicateService implements LlmService {
     };
 
     if (modelName === 'bytedance/bagel') {
-        targetModelApiName = 'bytedance/bagel'; // Use model name without version hash
+        targetModelApiName = 'bytedance/bagel:7dd8def79e503990740db4704fa81af995d440fefe714958531d7044d2757c9c';
         // Bagel-specific inputs
         Object.assign(input, {
             cfg_img_scale: 1.5,
@@ -151,23 +151,9 @@ export class ReplicateService implements LlmService {
     console.log(`Replicate Service: Sending request to model ${targetModelApiName}. Input keys: ${Object.keys(input).join(', ')}`);
 
     try {
-      // Create the prediction and wait for it to complete.
-      const prediction = await replicate.predictions.create({
-        model: targetModelApiName,
-        input: input,
-      });
-      const completedPrediction = await replicate.wait(prediction);
+      const output = await replicate.run(targetModelApiName as `${string}/${string}:${string}`, { input });
 
-      console.log("Replicate Service: Prediction completed:", completedPrediction);
-
-      if (completedPrediction.status !== 'succeeded') {
-        const errorDetail = (completedPrediction.error as { detail?: string })?.detail || `Prediction failed with status: ${completedPrediction.status}.`;
-        return (async function*() {
-          yield { text: `[Error: ${errorDetail}]` };
-        })();
-      }
-
-      const output = completedPrediction.output;
+      console.log("Replicate Service: Prediction completed:", output);
 
       return (async function*() {
         let imageUrl: string | undefined;

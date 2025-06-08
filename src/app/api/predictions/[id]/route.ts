@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import Replicate from 'replicate';
 
 const replicate = new Replicate({
@@ -6,10 +6,10 @@ const replicate = new Replicate({
 });
 
 export async function GET(
-  request: Request,
-  context: { params: { id: string } }
+  request: NextRequest,
+  { params }: { params: { id: string } }
 ) {
-  const predictionId = context.params.id;
+  const predictionId = params.id;
   if (!predictionId) {
     return NextResponse.json({ error: 'Prediction ID is required' }, { status: 400 });
   }

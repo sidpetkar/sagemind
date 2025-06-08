@@ -7,15 +7,16 @@ const replicate = new Replicate({
 
 export async function GET(
   request: Request,
-  context: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
-  const predictionId = context.params.id;
-  if (!predictionId) {
+  const { id } = await context.params;
+  
+  if (!id) {
     return NextResponse.json({ error: 'Prediction ID is required' }, { status: 400 });
   }
 
   try {
-    const prediction = await replicate.predictions.get(predictionId);
+    const prediction = await replicate.predictions.get(id);
     
     if (prediction.error) {
         return NextResponse.json({ detail: prediction.error }, { status: 500 });
@@ -24,7 +25,7 @@ export async function GET(
     return NextResponse.json(prediction, { status: 200 });
 
   } catch (error) {
-    console.error(`Error fetching prediction ${predictionId}:`, error);
+    console.error(`Error fetching prediction ${id}:`, error);
     return NextResponse.json({ detail: 'Failed to fetch prediction status.' }, { status: 500 });
   }
 } 

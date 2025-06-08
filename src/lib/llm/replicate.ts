@@ -151,54 +151,16 @@ export class ReplicateService implements LlmService {
     console.log(`Replicate Service: Sending request to model ${targetModelApiName}. Input keys: ${Object.keys(input).join(', ')}`);
 
     try {
-      const output = await replicate.run(targetModelApiName as `${string}/${string}:${string}`, { input });
+      // Don't wait for the prediction to complete on the server.
+      // Start it and immediately return the prediction object to the client.
+      const prediction = await replicate.predictions.create({
+        model: targetModelApiName as `${string}/${string}:${string}`,
+        input: input,
+      });
 
-      console.log("Replicate Service: Prediction completed:", output);
-
+      // The client will use this to poll for the result.
       return (async function*() {
-        let imageUrl: string | undefined;
-        let textOutput: string | undefined;
-        let mimeType: string = 'image/jpeg'; // Default
-
-        if (modelName === 'bytedance/bagel') {
-            mimeType = 'image/jpeg';
-            if (output && typeof output === 'object' && !Array.isArray(output)) {
-                const bagelOutput = output as ReplicateOutput;
-                imageUrl = bagelOutput.image;
-                textOutput = bagelOutput.text;
-            }
-        } else if (modelName === 'black-forest-labs/flux-kontext-pro') {
-            mimeType = 'image/jpeg'; // flux uses jpg or png
-            if (typeof output === 'string') {
-                imageUrl = output;
-            } else if (Array.isArray(output) && output.length > 0 && typeof output[0] === 'string') {
-                // Handle cases where the model might return an array with a single image URL
-                imageUrl = output[0];
-            }
-        }
-
-        if (textOutput && (!imageUrl || input.task === 'image-understanding')) {
-          yield { text: textOutput };
-        }
-        
-        if (imageUrl) {
-          try {
-            const imageResponse = await fetch(imageUrl);
-            if (!imageResponse.ok) {
-              throw new Error(`Failed to fetch image from Replicate: ${imageResponse.statusText} (URL: ${imageUrl})`);
-            }
-            const imageBuffer = await imageResponse.arrayBuffer();
-            const imageBase64 = Buffer.from(imageBuffer).toString('base64');
-            const responseText = textOutput || `Image processed for: "${message}"`;
-            yield { imageBase64: imageBase64, text: responseText, imageMimeType: mimeType };
-          } catch (fetchError: any) {
-            console.error("Replicate Service: Error fetching or converting image from URL:", fetchError);
-            yield { text: `[Error fetching/converting image from Replicate: ${fetchError.message}]` };
-          }
-        } else if (!textOutput) {
-            console.warn("Replicate Service: Model returned no discernible output.", { modelName, output });
-            yield { text: "[Warning: Model returned no discernible output.]" };
-        }
+        yield { prediction: prediction };
       })();
 
     } catch (error: any) {

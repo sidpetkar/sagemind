@@ -20,6 +20,14 @@ export interface FileUri {
   name?: string;
 }
 
+export interface Prediction {
+  id: string;
+  status: 'starting' | 'processing' | 'succeeded' | 'failed' | 'canceled';
+  output?: any;
+  error?: any;
+  // Add other fields from the Replicate prediction object as needed
+}
+
 export interface LlmService {
   // Update signature to accept fileUri as an alternative to fileData
   // and to yield structured objects for text and grounding information.
@@ -37,5 +45,6 @@ export interface LlmService {
     imageMimeType?: string; // Added for specifying the type of imageBase64
     sourceCitations?: string[]; 
     youtubeVideos?: YouTubeVideo[];
+    prediction?: Prediction;
   }>>;
 } 

@@ -50,7 +50,7 @@ import { storeImageToFirebase, getImageFromStorage } from '../lib/imageStorage';
 
 // Import YouTube video type
 import { YouTubeVideo } from '../lib/youtube'; // Added import for YouTubeVideo type
-import { ChatMessage } from '../lib/llm/interface'; // Added import for ChatMessage type
+import { ChatMessage, Prediction } from '../lib/llm/interface'; // Added import for ChatMessage type
 
 interface Message {
   role: 'user' | 'ai';
@@ -1336,93 +1336,100 @@ export default function ChatPage() {
           throw new Error(errorResponseMessage);
         }
 
-        // ---- HANDLE FLUX (Non-Streamed JSON) vs. Other (Streamed) Models ----
-        if (selectedModel === 'black-forest-labs/FLUX.1-schnell-Free' || selectedModel === 'bytedance/bagel' || selectedModel === 'black-forest-labs/flux-kontext-pro') {
-          // These models returns a single JSON object, not a stream
-          const payload = await response.json();
+        // ---- HANDLE ALL MODELS VIA STREAMING RESPONSE ----
+        if (!response.body) {
+          throw new Error("Response body is null.");
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let accumulatedText = "";
+        let webSearchQueries: string[] | undefined = undefined;
+        let renderedContent: string | undefined = undefined;
+        let sourceCitations: string[] | undefined = undefined;
+        let imageBase64: string | undefined = undefined;
+        let imageMimeType: string | undefined = undefined;
+
+        // A flag to see if we should stop processing the stream for this message
+        let isPollingInitiated = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
           
-          // Replace loading message with the result
-          setMessages(prev => [
-            ...prev.slice(0, prev.length - 1),
-            {
-              role: 'ai',
-              content: payload.text || '',
-              imageBase64: payload.imageBase64,
-              imageMimeType: payload.imageMimeType,
-            }
-          ]);
+          const chunkString = decoder.decode(value, { stream: true });
+          console.log("Received chunk:", chunkString); 
           
-          // Save the chat
-          saveCurrentChat();
-        } else {
-          // Handle streamed response for other models
-          if (!response.body) {
-            throw new Error("Response body is null for a streaming model.");
-          }
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let accumulatedText = "";
-          let webSearchQueries: string[] | undefined = undefined;
-          let renderedContent: string | undefined = undefined;
-          let sourceCitations: string[] | undefined = undefined;
-          let imageBase64: string | undefined = undefined; // Added to capture image for streaming models
-          let imageMimeType: string | undefined = undefined; // Added to capture MIME type
+          // Process each JSON object in the chunk
+          const jsonObjects = chunkString.split('\n').filter(line => line.trim().startsWith('{') && line.trim().endsWith('}'));
 
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            
-            const chunkString = decoder.decode(value, { stream: true });
-            console.log("Received chunk:", chunkString); 
-            
-            const jsonObjects = chunkString.split('\n').filter(line => line.trim().startsWith('{') && line.trim().endsWith('}'));
+          if (jsonObjects.length > 0) {
+            for (const objStr of jsonObjects) {
+              try {
+                const parsedChunk = JSON.parse(objStr.trim()) as {
+                  text?: string, 
+                  webSearchQueries?: string[], 
+                  renderedContent?: string, 
+                  sourceCitations?: string[], 
+                  imageBase64?: string, 
+                  imageMimeType?: string,
+                  prediction?: Prediction // Added for polling
+                };
+                
+                // If we receive a prediction object, start polling and stop stream processing
+                if (parsedChunk.prediction) {
+                  isPollingInitiated = true;
+                  pollForPredictionResult(parsedChunk.prediction);
+                  // Break from the inner for...of loop
+                  break; 
+                }
+                
+                // Standard stream processing for other models
+                if (parsedChunk.text) accumulatedText += parsedChunk.text;
+                if (parsedChunk.webSearchQueries) webSearchQueries = parsedChunk.webSearchQueries;
+                if (parsedChunk.renderedContent) renderedContent = parsedChunk.renderedContent;
+                if (parsedChunk.sourceCitations) sourceCitations = parsedChunk.sourceCitations;
+                if (parsedChunk.imageBase64) imageBase64 = parsedChunk.imageBase64;
+                if (parsedChunk.imageMimeType) imageMimeType = parsedChunk.imageMimeType;
 
-            if (jsonObjects && jsonObjects.length > 0) {
-              jsonObjects.forEach(objStr => {
-                try {
-                  const parsedChunk = JSON.parse(objStr.trim()) as {text?: string, webSearchQueries?: string[], renderedContent?: string, sourceCitations?: string[], imageBase64?: string, imageMimeType?: string };
-                  
-                  if (parsedChunk.text) {
-                    accumulatedText += parsedChunk.text;
-                  }
-                  if (parsedChunk.webSearchQueries) webSearchQueries = parsedChunk.webSearchQueries;
-                  if (parsedChunk.renderedContent) renderedContent = parsedChunk.renderedContent;
-                  if (parsedChunk.sourceCitations) sourceCitations = parsedChunk.sourceCitations;
-                  if (parsedChunk.imageBase64) imageBase64 = parsedChunk.imageBase64; // Capture imageBase64
-                  if (parsedChunk.imageMimeType) imageMimeType = parsedChunk.imageMimeType; // Capture imageMimeType
-
-                  updateAiMessage({
-                    completeContent: accumulatedText, 
-                    webSearchQueries: webSearchQueries,
-                    renderedContent: renderedContent,
-                    sourceCitations: sourceCitations,
-                    imageBase64: imageBase64, // Pass to updateAiMessage
-                    imageMimeType: imageMimeType, // Pass to updateAiMessage
-                  });
-                } catch (e) {
-                  console.error("Failed to parse chunk:", objStr, e);
-                  if (typeof objStr === 'string' && objStr.includes('"text"')) {
-                    const textMatch = objStr.match(/"text":"(.*?)"/);
-                    if (textMatch && textMatch[1]) {
-                      let recoveredText = textMatch[1];
-                      try { recoveredText = JSON.parse('"' + recoveredText + '"'); }
-                      catch (sanitizeError) { console.warn("Could not fully sanitize recovered text:", recoveredText, sanitizeError); }
-                      accumulatedText += recoveredText;
-                      updateAiMessage({ completeContent: accumulatedText });
-                    }
+                updateAiMessage({
+                  completeContent: accumulatedText, 
+                  webSearchQueries: webSearchQueries,
+                  renderedContent: renderedContent,
+                  sourceCitations: sourceCitations,
+                  imageBase64: imageBase64,
+                  imageMimeType: imageMimeType,
+                });
+              } catch (e) {
+                console.error("Failed to parse chunk:", objStr, e);
+                // Simple recovery for malformed JSON that still contains text
+                if (typeof objStr === 'string' && objStr.includes('"text"')) {
+                  const textMatch = objStr.match(/"text":"(.*?)"/);
+                  if (textMatch?.[1]) {
+                    let recoveredText = textMatch[1];
+                    try { recoveredText = JSON.parse('"' + recoveredText + '"'); }
+                    catch (sanitizeError) { console.warn("Could not fully sanitize recovered text:", recoveredText, sanitizeError); }
+                    accumulatedText += recoveredText;
+                    updateAiMessage({ completeContent: accumulatedText });
                   }
                 }
-              });
+              }
+            }
+             // If polling started, break from the outer while loop too
+            if (isPollingInitiated) {
+              break;
             }
           }
-          setMessages(prevMsgs => {
-            const finalUserMessage = prevMsgs[prevMsgs.length - 2]; 
-            const finalAiMessage = prevMsgs[prevMsgs.length - 1]; 
-            if (finalUserMessage && finalUserMessage.role === 'user' && finalAiMessage && finalAiMessage.role === 'ai'){
-                saveCurrentChat(prevMsgs); 
-            }
-            return prevMsgs;
-          });
+        }
+         // Save chat only if the response was fully processed here (not polling)
+        if (!isPollingInitiated) {
+            setMessages(prevMsgs => {
+              const finalUserMessage = prevMsgs[prevMsgs.length - 2]; 
+              const finalAiMessage = prevMsgs[prevMsgs.length - 1]; 
+              if (finalUserMessage?.role === 'user' && finalAiMessage?.role === 'ai') {
+                  saveCurrentChat(prevMsgs); 
+              }
+              return prevMsgs;
+            });
         }
       }
     } catch (err: any) {
@@ -1438,7 +1445,7 @@ export default function ChatPage() {
       // Auto-scroll to bottom after response is fully processed or on error
       // Ensure this only happens if user hasn't manually scrolled up
       if (!isAutoScrollingPaused) {
-        scrollToBottom();
+        scrollToBottom('auto'); // Use auto for less disruptive scrolling on final update
       }
     }
   };
@@ -1528,6 +1535,152 @@ export default function ChatPage() {
         // No need to start an inactivity timer if user is already at the bottom
       }
     }
+  };
+
+  // Fetches an image from a URL via our proxy and converts it to base64
+  const fetchAndConvertToBase64 = async (imageUrl: string) => {
+    try {
+      const response = await fetch('/api/image-proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: imageUrl })
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `Failed to fetch image: ${response.statusText}`);
+      }
+      const { base64, mimeType } = await response.json();
+      return { base64, mimeType };
+    } catch (error) {
+      console.error("Error fetching or converting image:", error);
+      // Update the last message with an error state
+      setMessages(prev => {
+        const newMessages = [...prev];
+        const lastMessage = newMessages[newMessages.length - 1];
+        if (lastMessage && lastMessage.isLoading) {
+          lastMessage.isLoading = false;
+          lastMessage.content = `[Error: Failed to load generated image. ${error instanceof Error ? error.message : ''}]`;
+        }
+        return newMessages;
+      });
+      return null;
+    }
+  };
+  
+  // Polls for the result of a Replicate prediction
+  const pollForPredictionResult = async (initialPrediction: Prediction) => {
+    const { id: predictionId, status: initialStatus } = initialPrediction;
+  
+    if (initialStatus === 'failed' || initialStatus === 'canceled') {
+        const errorMessage = typeof initialPrediction.error === 'string' ? initialPrediction.error : JSON.stringify(initialPrediction.error);
+        setMessages(prev => {
+            const newMessages = [...prev];
+            const lastMessage = newMessages[newMessages.length - 1];
+            if (lastMessage && lastMessage.isLoading) {
+                lastMessage.isLoading = false;
+                lastMessage.content = `[Error: Prediction failed or was canceled. ${errorMessage}]`;
+            }
+            return newMessages;
+        });
+        saveCurrentChat();
+        return;
+    }
+
+    const poll = async (id: string) => {
+      try {
+        const response = await fetch(`/api/predictions/${id}`);
+        if (!response.ok) {
+          throw new Error(`Polling failed: ${response.statusText}`);
+        }
+        const prediction = await response.json() as Prediction;
+
+        switch (prediction.status) {
+          case 'succeeded': {
+            let imageUrl: string | undefined;
+            let textOutput: string | undefined;
+            
+            // Handle different output structures from Replicate models
+            if (typeof prediction.output === 'string') {
+              imageUrl = prediction.output;
+            } else if (Array.isArray(prediction.output) && typeof prediction.output[0] === 'string') {
+              imageUrl = prediction.output[0];
+            } else if (typeof prediction.output === 'object' && prediction.output !== null) {
+              const outputObj = prediction.output as { image?: string; text?: string };
+              imageUrl = outputObj.image;
+              textOutput = outputObj.text;
+            }
+            
+            if (imageUrl) {
+              const imageData = await fetchAndConvertToBase64(imageUrl);
+              if (imageData) {
+                setMessages(prev => {
+                  const newMessages = [...prev];
+                  const lastMessage = newMessages[newMessages.length - 1];
+                  if (lastMessage && lastMessage.isLoading) {
+                    lastMessage.isLoading = false;
+                    lastMessage.content = textOutput || '';
+                    lastMessage.imageBase64 = imageData.base64;
+                    lastMessage.imageMimeType = imageData.mimeType;
+                  }
+                  return newMessages;
+                });
+              }
+            } else if (textOutput) { // Handle text-only output from vision models
+                 setMessages(prev => {
+                  const newMessages = [...prev];
+                  const lastMessage = newMessages[newMessages.length - 1];
+                  if (lastMessage && lastMessage.isLoading) {
+                    lastMessage.isLoading = false;
+                    lastMessage.content = textOutput;
+                  }
+                  return newMessages;
+                });
+            } else {
+              throw new Error("Prediction succeeded but returned no discernible output.");
+            }
+            saveCurrentChat();
+            break;
+          }
+          case 'failed':
+          case 'canceled': {
+            const errorDetail = prediction.error ? (typeof prediction.error === 'string' ? prediction.error : JSON.stringify(prediction.error)) : 'Unknown reason.';
+            setMessages(prev => {
+              const newMessages = [...prev];
+              const lastMessage = newMessages[newMessages.length - 1];
+              if (lastMessage && lastMessage.isLoading) {
+                lastMessage.isLoading = false;
+                lastMessage.content = `[Error: Prediction ${prediction.status}. ${errorDetail}]`;
+              }
+              return newMessages;
+            });
+            saveCurrentChat();
+            break;
+          }
+          case 'starting':
+          case 'processing':
+          default: {
+            // It's still running, poll again after a delay
+            setTimeout(() => poll(id), 2500);
+            break;
+          }
+        }
+      } catch (err) {
+        console.error("Error during polling:", err);
+        setMessages(prev => {
+          const newMessages = [...prev];
+          const lastMessage = newMessages[newMessages.length - 1];
+          if (lastMessage && lastMessage.isLoading) {
+            lastMessage.isLoading = false;
+            lastMessage.content = `[Error: Could not retrieve prediction result. ${err instanceof Error ? err.message : ''}]`;
+          }
+          return newMessages;
+        });
+        saveCurrentChat();
+      } 
+    };
+  
+    // Start polling immediately
+    poll(predictionId);
   };
 
   if (authLoading) {

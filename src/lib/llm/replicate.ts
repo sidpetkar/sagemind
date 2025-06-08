@@ -1,5 +1,5 @@
 import Replicate from "replicate";
-import { LlmService, ChatMessage, FileData, FileUri } from "./interface";
+import { LlmService, ChatMessage, FileData, FileUri, Prediction } from "./interface";
 
 // Access your API key as an environment variable
 const apiKey = process.env.REPLICATE_API_TOKEN;
@@ -160,7 +160,10 @@ export class ReplicateService implements LlmService {
 
       // The client will use this to poll for the result.
       return (async function*() {
-        yield { prediction: prediction };
+        yield { 
+          text: "Your image is being generated...", 
+          prediction: prediction as Prediction 
+        };
       })();
 
     } catch (error: any) {
